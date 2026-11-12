@@ -5,7 +5,7 @@ const path = require("path");
 
 const builder = new addonBuilder({
     id: "org.internetarchive.movies",
-    version: "2.0.0",
+    version: "2.1.0",
     name: "Internet Archive Movies",
     description: "Recherche et diffuse des films depuis Internet Archive (Community Video & Feature Films).",
     resources: ["catalog", "stream"],
@@ -145,32 +145,47 @@ function getMatchScore(hasImdbMatch, fileMatchesTitle, archiveMatchesTitle) {
 }
 
 /* ============================================================
-   CONSTRUCTION DES REQUÊTES DE RECHERCHE (multi-stratégies)
+   CONSTRUCTION DES REQUÊTES (CORRIGÉE — keyword-based)
    ============================================================ */
 
 function buildSearchQueries(id, title, year) {
     const queries = [];
 
-    // 1. Par ID IMDb (rare mais possible dans description)
+    // 1. ID IMDb
     queries.push(`mediatype:(movies) AND (${id})`);
 
-    // 2. Titre exact entre guillemets + année
-    const cleanTitle = title.replace(/[^\w\s]/g, " ").replace(/\s+/g, " ").trim();
-    if (year) queries.push(`mediatype:(movies) AND title:("${cleanTitle}") AND year:${year}`);
-    queries.push(`mediatype:(movies) AND title:("${cleanTitle}")`);
+    // 2. Recherche par mots-clés (SANS title:)
+    const words = title
+        .replace(/[^\w\s]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .split(" ")
+        .filter(w => w.length > 1 && !["the", "a", "an"].includes(w.toLowerCase()));
 
-    // 3. Titre SANS article "The" (Twilight Saga Eclipse au lieu de The Twilight Saga Eclipse)
-    const strippedTitle = cleanTitle.replace(/^(the|a|an)\s+/i, "").trim();
-    if (strippedTitle !== cleanTitle) {
-        if (year) queries.push(`mediatype:(movies) AND title:("${strippedTitle}") AND year:${year}`);
-        queries.push(`mediatype:(movies) AND title:("${strippedTitle}")`);
+    if (words.length > 0) {
+        const keywordQuery = words.join(" ");
+        if (year) {
+            queries.push(`mediatype:(movies) AND (${keywordQuery}) AND year:${year}`);
+        }
+        queries.push(`mediatype:(movies) AND (${keywordQuery})`);
+
+        if (words.length >= 3) {
+            const coreWords = words.slice(0, 3).join(" ");
+            if (year) {
+                queries.push(`mediatype:(movies) AND (${coreWords}) AND year:${year}`);
+            }
+            queries.push(`mediatype:(movies) AND (${coreWords})`);
+        }
     }
 
-    // 4. Recherche libre sur les mots du titre (fallback large)
-    const titleWords = strippedTitle.split(" ").filter(w => w.length > 2);
-    if (titleWords.length >= 2) {
-        const wordQuery = titleWords.map(w => `title:(${w})`).join(" AND ");
-        queries.push(`mediatype:(movies) AND ${wordQuery}${year ? ` AND year:${year}` : ""}`);
+    // 3. Recherche par préfixe d'identifiant (le slug du titre est souvent dans l'identifier)
+    const slug = title
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, " ")
+        .replace(/\s+/g, ".")
+        .trim();
+    if (slug.length > 5) {
+        queries.push(`mediatype:(movies) AND identifier:(${slug}*)`);
     }
 
     return queries;
@@ -330,7 +345,7 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
 });
 
 /* ============================================================
-   HANDLER STREAM (multi-stratégies)
+   HANDLER STREAM
    ============================================================ */
 
 builder.defineStreamHandler(async ({ type, id }) => {
@@ -352,13 +367,16 @@ builder.defineStreamHandler(async ({ type, id }) => {
             const year = movieMeta.year ? String(movieMeta.year).substring(0, 4) : null;
 
             const searchQueries = buildSearchQueries(id, title, year);
+            console.log(`[IA] Requêtes pour "${title}" (${year}):`, searchQueries);
 
-            // Exécute toutes les requêtes en parallèle
             const searchPromises = searchQueries.map(q => {
-                const url = `https://archive.org/advancedsearch.php?q=${encodeURIComponent(q)}&fl[]=identifier,title,year&sort[]=downloads+desc&rows=15&output=json`;
+                const url = `https://archive.org/advancedsearch.php?q=${encodeURIComponent(q)}&fl[]=identifier,title,year&sort[]=downloads+desc&rows=20&output=json`;
                 return axios.get(url, { timeout: 6000 })
                     .then(res => res.data.response.docs || [])
-                    .catch(() => []);
+                    .catch((e) => {
+                        console.log(`[IA] Requête échouée: ${q}`, e.message);
+                        return [];
+                    });
             });
 
             const results = await Promise.all(searchPromises);
@@ -366,18 +384,16 @@ builder.defineStreamHandler(async ({ type, id }) => {
             results.flat().forEach(d => docsMap.set(d.identifier, d));
             const docs = Array.from(docsMap.values());
 
-            console.log(`[IA] ${searchQueries.length} requêtes, ${docs.length} items pour "${title}" (${year})`);
+            console.log(`[IA] ${searchQueries.length} requêtes → ${docs.length} items uniques`);
 
-            // Filtre strict sur le titre
             const validDocs = docs.filter(doc => {
                 const docTitle = Array.isArray(doc.title) ? doc.title[0] : (doc.title || "");
                 return isMatch(docTitle + " " + doc.identifier, title, year);
             });
 
-            console.log(`[IA] ${validDocs.length} items valides après filtre strict`);
+            console.log(`[IA] ${validDocs.length} items valides après isMatch`);
 
-            // Limite pour rester dans le timeout Vercel
-            const limitedDocs = validDocs.slice(0, 8);
+            const limitedDocs = validDocs.slice(0, 10);
 
             const streamPromises = limitedDocs.map(doc => getStreamsFromIA(doc.identifier, title, year, id));
             const results2 = await Promise.all(streamPromises);
@@ -402,7 +418,7 @@ builder.defineStreamHandler(async ({ type, id }) => {
                 }
             }
 
-            console.log(`[IA] ${uniqueStreams.length} flux finaux pour "${title}"`);
+            console.log(`[IA] ${uniqueStreams.length} flux finaux`);
             return { streams: uniqueStreams };
         } catch (error) {
             console.error("Erreur recherche IMDb -> IA:", error.message);
