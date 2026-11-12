@@ -1,9 +1,10 @@
 {
   "version": 2,
-  "rewrites": [
-    {
-      "source": "/(.*)",
-      "destination": "/api/index.js"
-    }
+  "routes": [
+    { "src": "/manifest.json", "dest": "/api/index.js" },
+    { "src": "/catalog/(.*)", "dest": "/api/index.js" },
+    { "src": "/stream/(.*)", "dest": "/api/index.js" },
+    { "src": "/", "dest": "/api/index.js" },
+    { "src": "/(.*)", "dest": "/api/index.js" }
   ]
 }
