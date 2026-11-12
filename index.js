@@ -119,9 +119,10 @@ const NOT_WEB_READY = new Set(["mkv", "avi", "ogv", "wmv", "flv", "mpg", "mpeg",
 
 const manifest = {
   id: "org.example.archivemoviesearch",
-  version: "1.6.0",
-  name: "Internet Archive Movies & Shows",
-  description: "Public domain and freely available movies and TV episodes from the Internet Archive",
+  version: "1.6.2",
+  name: "Internet Archive DZ",
+  description: "Movies and TV episodes from the Internet Archive",
+  logo: "https://i.pinimg.com/1200x/fb/0d/cc/fb0dccec209770b71f8570c3bb8a38b7.jpg",
   resources: ["stream"],
   types: ["movie", "series"],
   idPrefixes: ["tt"],
