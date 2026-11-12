@@ -5,7 +5,7 @@ const path = require("path");
 
 const builder = new addonBuilder({
     id: "org.internetarchive.movies",
-    version: "1.5.0", // Passage à la version 1.5.0
+    version: "1.6.0", // Passage à la version 1.6.0
     name: "Internet Archive Movies",
     description: "Recherche et diffuse des films du domaine public et archives depuis Internet Archive.",
     resources: ["catalog", "stream"],
@@ -27,34 +27,36 @@ async function getStreamsFromIA(identifier, itemTitle = "") {
         const metadataUrl = `https://archive.org/metadata/${identifier}`;
         const response = await axios.get(metadataUrl);
         const files = response.data.files || [];
-
-        // Récupérer le titre de l'archive si non fourni
         const archiveTitle = itemTitle || response.data.metadata?.title || identifier;
 
-        // Filtrer les fichiers vidéo valides
         const videoFiles = files.filter(f => {
             if (!f.name) return false;
             const lowerName = f.name.toLowerCase();
+            const lowerArchive = archiveTitle.toLowerCase();
             
             const isVideoExt = lowerName.endsWith(".mp4") || lowerName.endsWith(".mkv") || lowerName.endsWith(".ogv") || lowerName.endsWith(".avi");
             
+            // Filtre strict anti-bruit / documentaires / reviews / bonus
             const isJunk = lowerName.includes("trailer") || 
                           lowerName.includes("sample") || 
                           lowerName.includes("teaser") || 
                           lowerName.includes("clip") ||
                           lowerName.includes("advertisement") ||
-                          lowerName.includes("subtitles");
+                          lowerName.includes("subtitles") ||
+                          lowerName.includes("commentary") ||
+                          lowerName.includes("documentary") ||
+                          lowerArchive.includes("review") ||
+                          lowerArchive.includes("documentary") ||
+                          lowerArchive.includes("archive of");
 
             const fileSize = f.size || 0;
-            const isTooSmall = fileSize < 50 * 1024 * 1024; // 50 Mo minimum
+            const isTooSmall = fileSize < 100 * 1024 * 1024; // 100 Mo minimum pour un vrai film
 
             return isVideoExt && !isJunk && !isTooSmall;
         });
 
-        // Trier par taille de fichier décroissante
         videoFiles.sort((a, b) => (b.size || 0) - (a.size || 0));
 
-        // Formater les flux
         return videoFiles.map(file => {
             const sizeGB = (file.size / (1024 * 1024 * 1024)).toFixed(1);
             const sizeDisplay = sizeGB >= 1 ? `${sizeGB} GB` : `${Math.round(file.size / (1024 * 1024))} MB`;
@@ -62,13 +64,12 @@ async function getStreamsFromIA(identifier, itemTitle = "") {
             
             let quality = "720p / 1080p";
             const lower = (file.name + " " + archiveTitle).toLowerCase();
-            if (lower.includes("1080p")) quality = "1080p";
+            if (lower.includes("1080p") || lower.includes("blu-ray")) quality = "1080p";
             else if (lower.includes("720p")) quality = "720p";
             else if (lower.includes("480p") || lower.includes("dvd")) quality = "480p";
 
-            // Si le nom du fichier est générique (ex: movie.mp4), on utilise le titre de l'archive
             let displayTitle = file.name;
-            if (displayTitle.length < 10 || displayTitle.toLowerCase().includes("movie") || displayTitle.toLowerCase().includes("godfather")) {
+            if (displayTitle.length < 10 || displayTitle.toLowerCase().includes("movie")) {
                 displayTitle = archiveTitle;
             }
 
@@ -86,12 +87,10 @@ async function getStreamsFromIA(identifier, itemTitle = "") {
 // Gestion du catalogue et de la recherche
 builder.defineCatalogHandler(async ({ type, id, extra }) => {
     try {
-        let searchQuery = "mediatype:(movies)";
+        let searchQuery = "mediatype:(movies) AND collection:(feature_films)";
         
         if (extra && extra.search) {
             searchQuery += ` AND title:(${extra.search})`;
-        } else {
-            searchQuery += " AND collection:(feature_films)";
         }
 
         const url = `https://archive.org/advancedsearch.php?q=${encodeURIComponent(searchQuery)}&fl[]=identifier,title,description,year&sort[]=downloads+desc&rows=30&output=json`;
@@ -135,9 +134,9 @@ builder.defineStreamHandler(async ({ type, id }) => {
                 return { streams: [] };
             }
 
-            // Élargissement de la recherche : on cherche dans le titre ET on augmente à 5 résultats (rows=5)
-            const searchQuery = `mediatype:(movies) AND (title:("${movieMeta.name}") OR description:("${movieMeta.name}"))`;
-            const searchUrl = `https://archive.org/advancedsearch.php?q=${encodeURIComponent(searchQuery)}&fl[]=identifier,title&sort[]=downloads+desc&rows=5&output=json`;
+            // Requête ultra-ciblée : on force la recherche dans la collection des longs-métrages (feature_films)
+            const searchQuery = `mediatype:(movies) AND collection:(feature_films) AND title:("${movieMeta.name}")`;
+            const searchUrl = `https://archive.org/advancedsearch.php?q=${encodeURIComponent(searchQuery)}&fl[]=identifier,title&sort[]=downloads+desc&rows=3&output=json`;
             const searchRes = await axios.get(searchUrl);
             const docs = searchRes.data.response.docs || [];
 
@@ -148,9 +147,7 @@ builder.defineStreamHandler(async ({ type, id }) => {
                 allStreams = allStreams.concat(streams);
             }
 
-            // Supprimer les doublons potentiels basés sur l'URL
             const uniqueStreams = Array.from(new Map(allStreams.map(s => [s.url, s])).values());
-
             return { streams: uniqueStreams };
         } catch (error) {
             console.error("Erreur recherche IMDb -> IA:", error.message);
