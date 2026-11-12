@@ -5,7 +5,7 @@ const path = require("path");
 
 const builder = new addonBuilder({
     id: "org.internetarchive.movies",
-    version: "2.0.0", // Passage à la version majeure 2.0.0
+    version: "2.1.0", // Passage à la version 2.1.0
     name: "Internet Archive Movies",
     description: "Recherche et diffuse des films depuis Internet Archive.",
     resources: ["catalog", "stream"],
@@ -21,7 +21,7 @@ const builder = new addonBuilder({
     idPrefixes: ["ia:", "tt"]
 });
 
-// Normalisation du texte
+// Normalisation rigoureuse du texte
 function normalizeText(str) {
     if (!str) return "";
     return str
@@ -30,6 +30,33 @@ function normalizeText(str) {
         .replace(/[^a-z0-9]/g, " ")
         .replace(/\s+/g, " ")
         .trim();
+}
+
+// Vérification stricte que le texte correspond au film recherché (Titre + Année)
+function strictMatch(text, targetTitle, targetYear) {
+    const normText = normalizeText(text);
+    const normTitle = normalizeText(targetTitle);
+
+    const stopWords = ["the", "a", "an", "of", "and", "to", "in", "saga"];
+    const titleWords = normTitle.split(" ").filter(w => w.length > 1 && !stopWords.includes(w));
+    
+    if (titleWords.length === 0) return false;
+
+    // TOUS les mots clés principaux du titre doivent obligatoirement être présents dans le nom du fichier ou de l'archive
+    const allWordsPresent = titleWords.every(word => normText.includes(word));
+    if (!allWordsPresent) return false;
+
+    // Si une année est spécifiée, vérifier qu'elle correspond (tolérance de 1 an)
+    const yearMatch = normText.match(/\b(19\d{2}|20\d{2})\b/);
+    if (targetYear && yearMatch) {
+        const foundYear = parseInt(yearMatch[1], 10);
+        const expectedYear = parseInt(targetYear, 10);
+        if (Math.abs(foundYear - expectedYear) > 1) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 // Fonction pour récupérer et filtrer les flux d'une archive IA
@@ -45,6 +72,14 @@ async function getStreamsFromIA(identifier, targetTitle = null, targetYear = nul
         
         const hasImdbMatch = imdbId ? archiveDesc.includes(imdbId.toLowerCase()) : false;
 
+        // Si on cherche un film précis, l'archive globale doit elle aussi correspondre (sauf si match IMDb direct)
+        if (targetTitle && !hasImdbMatch) {
+            const archiveValid = strictMatch(archiveTitle + " " + identifier, targetTitle, targetYear);
+            if (!archiveValid) {
+                return []; // On rejette toute l'archive si elle n'a aucun rapport avec le film
+            }
+        }
+
         const videoFiles = files.filter(f => {
             if (!f.name) return false;
             const lowerName = f.name.toLowerCase();
@@ -54,13 +89,19 @@ async function getStreamsFromIA(identifier, targetTitle = null, targetYear = nul
             const isVideoExt = lowerName.endsWith(".mp4") || lowerName.endsWith(".mkv") || lowerName.endsWith(".avi") || lowerName.endsWith(".ogv");
             if (!isVideoExt) return false;
 
-            // Exclure les éléments indésirables évidents
             const isJunk = /(trailer|sample|teaser|clip|advertisement|commentary|review|bloopers|making of)/i.test(lowerName);
             if (isJunk) return false;
 
-            // Taille minimale abaissée à 50 Mo pour ne rater aucun fichier valide
             const fileSize = parseInt(f.size || "0", 10);
-            if (fileSize < 50 * 1024 * 1024) return false;
+            if (fileSize < 100 * 1024 * 1024) return false; // 100 Mo min pour un film
+
+            // CONTRÔLE CRUCIAL : Le nom du fichier individuel DOIT correspondre au film recherché
+            if (targetTitle && !hasImdbMatch) {
+                const fileMatches = strictMatch(f.name, targetTitle, targetYear);
+                if (!fileMatches) {
+                    return false; // Élimine les fichiers parasites (ex: Minions dans une archive fourre-tout)
+                }
+            }
 
             return true;
         });
@@ -89,7 +130,7 @@ async function getStreamsFromIA(identifier, targetTitle = null, targetYear = nul
 
             const cleanFileName = file.name.split('/').pop();
             const displayTitle = cleanFileName.length > 12 ? cleanFileName : archiveTitle;
-            const matchBadge = hasImdbMatch ? "◎ 100% match · IMDb ✓" : "◎ Archive match";
+            const matchBadge = hasImdbMatch ? "◎ 100% match · IMDb ✓" : "◎ Strict match";
 
             return {
                 name: "🏛 Archive\n〈Full Movie〉",
@@ -157,10 +198,9 @@ builder.defineStreamHandler(async ({ type, id }) => {
             const title = movieMeta.name;
             const year = movieMeta.year ? String(movieMeta.year).substring(0, 4) : null;
             
-            // Stratégie de recherche combinée large : Recherche par ID IMDb, par titre exact, et par mots clés principaux
-            const firstWord = title.replace(/[^\w\s]/g, "").split(" ")[0]; // ex: "Twilight"
-            const searchQuery = `mediatype:(movies) AND (${id} OR title:("${title}") OR (text:"${firstWord}" AND text:"${year || ""}"))`;
-            const searchUrl = `https://archive.org/advancedsearch.php?q=${encodeURIComponent(searchQuery)}&fl[]=identifier,title,year&sort[]=downloads+desc&rows=15&output=json`;
+            // Requête ciblée par ID IMDb ou par titre exact
+            const searchQuery = `mediatype:(movies) AND (${id} OR title:("${title}"))`;
+            const searchUrl = `https://archive.org/advancedsearch.php?q=${encodeURIComponent(searchQuery)}&fl[]=identifier,title,year&sort[]=downloads+desc&rows=10&output=json`;
             
             const searchRes = await axios.get(searchUrl);
             const docs = searchRes.data.response.docs || [];
@@ -175,7 +215,6 @@ builder.defineStreamHandler(async ({ type, id }) => {
                 return b._size - a._size;
             });
 
-            // Supprimer les doublons d'URL
             const uniqueStreams = [];
             const seenUrls = new Set();
             for (const s of allStreams) {
