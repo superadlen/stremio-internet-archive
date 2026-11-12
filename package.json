@@ -1,10 +1,17 @@
 {
-  "name": "archive-stremio-addon",
-  "version": "1.0.0",
-  "description": "Stremio addon for Internet Archive movies",
+  "name": "stremio-internet-archive",
+  "version": "2.2.0",
+  "description": "Add-on Stremio pour diffuser des films depuis Internet Archive avec une haute précision",
   "main": "api/index.js",
-  "type": "module",
+  "scripts": {
+    "start": "node api/index.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.8",
+    "express": "^4.19.2",
+    "stremio-addon-sdk": "^1.7.1"
+  },
   "engines": {
-    "node": ">=18"
+    "node": ">=18.x"
   }
 }
