@@ -5,7 +5,7 @@ const path = require("path");
 
 const builder = new addonBuilder({
     id: "org.internetarchive.movies",
-    version: "1.3.0", // Passage à la version 1.3.0
+    version: "1.4.0", // Passage à la version 1.4.0
     name: "Internet Archive Movies",
     description: "Recherche et diffuse des films du domaine public et archives depuis Internet Archive.",
     resources: ["catalog", "stream"],
@@ -21,40 +21,58 @@ const builder = new addonBuilder({
     idPrefixes: ["ia:", "tt"]
 });
 
-// Fonction utilitaire pour nettoyer et filtrer les flux vidéo (Évite les bandes-annonces et mini-clips)
+// Fonction utilitaire pour nettoyer, filtrer et formater les flux vidéo comme l'exemple
 async function getStreamsFromIA(identifier) {
     try {
         const metadataUrl = `https://archive.org/metadata/${identifier}`;
         const response = await axios.get(metadataUrl);
         const files = response.data.files || [];
 
-        // Filtrer les fichiers vidéo valides et écarter les trailers/clips/samples
+        // Filtrer les fichiers vidéo valides
         const videoFiles = files.filter(f => {
             if (!f.name) return false;
             const lowerName = f.name.toLowerCase();
             
             // Extensions acceptées
-            const isVideoExt = lowerName.endsWith(".mp4") || lowerName.endsWith(".mkv") || lowerName.endsWith(".ogv");
+            const isVideoExt = lowerName.endsWith(".mp4") || lowerName.endsWith(".mkv") || lowerName.endsWith(".ogv") || lowerName.endsWith(".avi");
             
             // Exclure les mots clés indésirables (bandes-annonces, extraits, etc.)
             const isJunk = lowerName.includes("trailer") || 
                           lowerName.includes("sample") || 
                           lowerName.includes("teaser") || 
                           lowerName.includes("clip") ||
-                          lowerName.includes("advertisement");
+                          lowerName.includes("advertisement") ||
+                          lowerName.includes("subtitles");
 
-            return isVideoExt && !isJunk;
+            // Règle cruciale : Exclure tout fichier de moins de 50 Mo (élimine les 2 Mo et les mini-clips)
+            const fileSize = f.size || 0;
+            const isTooSmall = fileSize < 50 * 1024 * 1024; // 50 Mo minimum
+
+            return isVideoExt && !isJunk && !isTooSmall;
         });
 
-        // Trier par taille de fichier décroissante (le film complet est généralement le plus gros fichier)
+        // Trier par taille de fichier décroissante (le film complet le plus lourd en premier)
         videoFiles.sort((a, b) => (b.size || 0) - (a.size || 0));
 
-        // Ne garder que les 2 meilleures sources pour ne pas polluer l'interface
-        return videoFiles.slice(0, 2).map(file => ({
-            name: "Internet Archive",
-            title: `${file.name} (${Math.round((file.size || 0) / (1024 * 1024))} Mo)`,
-            url: `https://archive.org/download/${identifier}/${encodeURIComponent(file.name)}`
-        }));
+        // Formater les flux pour imiter le style professionnel des meilleurs add-ons
+        return videoFiles.map(file => {
+            const sizeGB = (file.size / (1024 * 1024 * 1024)).toFixed(1);
+            const sizeDisplay = sizeGB >= 1 ? `${sizeGB} GB` : `${Math.round(file.size / (1024 * 1024))} MB`;
+            const ext = file.name.split('.').pop().toUpperCase();
+            
+            // Détection basique de la qualité dans le nom
+            let quality = "720p / 1080p";
+            const lower = file.name.toLowerCase();
+            if (lower.includes("1080p")) quality = "1080p";
+            else if (lower.includes("720p")) quality = "720p";
+            else if (lower.includes("480p") || lower.includes("dvd")) quality = "480p";
+
+            return {
+                name: "🏛 Archive\n〈Full Movie〉",
+                title: `✎ ${file.name}\n◈ ${sizeDisplay} · ${ext}\n◆ ${quality}`,
+                url: `https://archive.org/download/${identifier}/${encodeURIComponent(file.name)}`
+            };
+        });
     } catch (error) {
         return [];
     }
