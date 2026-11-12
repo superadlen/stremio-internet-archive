@@ -1,286 +1,256 @@
-// api/index.js
-// Addon Stremio pour Internet Archive — version optimisée (timeouts + recherche large)
+const { addonBuilder, getRouter } = require("stremio-addon-sdk");
+const express = require("express");
+const axios = require("axios");
+const path = require("path");
 
-const manifest = {
-  id: 'org.community.archive.streams',
-  version: '1.5.0',
-  name: 'Archive.org Streams',
-  description: 'Stream public domain & archived movies from Internet Archive',
-  logo: 'https://archive.org/services/img/InternetArchive',
-  resources: ['catalog', 'stream'],
-  types: ['movie'],
-  catalogs: [{
-    type: 'movie',
-    id: 'archive_search',
-    name: 'Archive.org Search',
-    extra: [{ name: 'search', isRequired: true }, { name: 'skip', isRequired: false }]
-  }],
-  idPrefixes: ['archive:', 'tt'],
-  behaviorHints: { adult: false, p2p: false }
-};
+const builder = new addonBuilder({
+    id: "org.internetarchive.movies",
+    version: "1.7.0", // Passage à la version 1.7.0
+    name: "Internet Archive Movies",
+    description: "Recherche et diffuse des films depuis Internet Archive (Community Video & Feature Films).",
+    resources: ["catalog", "stream"],
+    types: ["movie"],
+    catalogs: [
+        {
+            type: "movie",
+            id: "ia_movies",
+            name: "Internet Archive",
+            extra: [{ name: "search", isRequired: false }]
+        }
+    ],
+    idPrefixes: ["ia:", "tt"]
+});
 
-// ---------- Utilitaires ----------
-
-function humanSize(bytes) {
-  if (!bytes) return '?';
-  const units = ['B', 'KB', 'MB', 'GB'];
-  let i = 0, n = Number(bytes);
-  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
-  return `${n.toFixed(1)} ${units[i]}`;
+// Nettoie une chaîne pour faciliter la comparaison (enlève ponctuation, accents, etc.)
+function normalizeText(str) {
+    if (!str) return "";
+    return str
+        .toLowerCase()
+        .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^a-z0-9\s]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
 }
 
-function extractQuality(filename = '', format = '') {
-  const text = `${filename} ${format}`.toLowerCase();
-  if (/(1080p|1080|fullhd|full hd)/.test(text)) return '1080p';
-  if (/(720p|720|hd)/.test(text)) return '720p';
-  if (/(480p|480|sd)/.test(text)) return '480p';
-  if (/(360p|360)/.test(text)) return '360p';
-  return 'unknown';
-}
+// Vérifie si le texte candidat correspond bien au film recherché (Titre + Année)
+function isMatch(candidateText, targetTitle, targetYear) {
+    const normCandidate = normalizeText(candidateText);
+    const normTitle = normalizeText(targetTitle);
 
-const QUALITY_RANK = { '1080p': 4, '720p': 3, '480p': 2, '360p': 1, unknown: 0 };
+    // Extraire les mots significatifs du titre
+    const titleWords = normTitle.split(" ").filter(w => w.length > 1);
+    if (titleWords.length === 0) return false;
 
-// ---------- Fetch avec timeout (crucial pour Vercel) ----------
+    // Tous les mots importants du titre doivent être présents
+    const hasAllWords = titleWords.every(word => normCandidate.includes(word));
+    if (!hasAllWords) return false;
 
-async function fetchWithTimeout(url, timeoutMs = 6000) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, {
-      signal: controller.signal,
-      headers: { 'User-Agent': 'stremio-archive-addon/1.5' }
-    });
-    return res;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-// ---------- Recherche Archive.org (large, sans title:) ----------
-
-async function fetchSearch(q, page = 1) {
-  const url = `https://archive.org/advancedsearch.php?` +
-    `q=${encodeURIComponent(q)}` +
-    `&fl[]=identifier&fl[]=title&fl[]=year&fl[]=description&fl[]=downloads&fl[]=mediatype` +
-    `&sort[]=downloads+desc&rows=20&page=${page}&output=json`;
-  const res = await fetchWithTimeout(url, 6000);
-  if (!res.ok) throw new Error(`Archive search HTTP ${res.status}`);
-  const data = await res.json();
-  return data?.response?.docs || [];
-}
-
-async function searchArchive(query, skip = 0) {
-  const page = Math.floor(skip / 20) + 1;
-  const q = query.trim();
-  if (!q) return [];
-
-  // Stratégie 1 : requête simple (Archive.org gère bien le texte libre)
-  let docs = [];
-  try {
-    docs = await fetchSearch(`${q} AND mediatype:movies`, page);
-  } catch (e) {
-    console.log('Search 1 failed:', e.message);
-  }
-
-  // Stratégie 2 : sans filtre movies
-  if (docs.length === 0) {
-    try {
-      docs = await fetchSearch(q, page);
-    } catch (e) {
-      console.log('Search 2 failed:', e.message);
+    // Vérifier l'année si présente dans le candidat (évite les remakes ou suites)
+    const yearMatch = normCandidate.match(/\b(19\d{2}|20\d{2})\b/);
+    if (targetYear && yearMatch) {
+        const foundYear = parseInt(yearMatch[1], 10);
+        const expectedYear = parseInt(targetYear, 10);
+        // Tolérance de 1 an (dates de sortie festival vs salle)
+        if (Math.abs(foundYear - expectedYear) > 1) {
+            return false;
+        }
     }
-  }
 
-  // Stratégie 3 : mots séparés en OR
-  if (docs.length === 0) {
-    const words = q.split(/\s+/).filter(w => w.length > 2);
-    if (words.length > 1) {
-      try {
-        const orQuery = words.map(w => `${w}`).join(' OR ');
-        docs = await fetchSearch(`(${orQuery}) AND mediatype:movies`, page);
-      } catch (e) {
-        console.log('Search 3 failed:', e.message);
-      }
+    // Éviter de confondre le 1er film avec une suite (Part 2, II, III, etc.) si non demandé
+    if (!normTitle.includes("part") && !normTitle.includes("ii") && !normTitle.includes("2") && !normTitle.includes("3")) {
+        if (/\b(part\s*2|part\s*3|part\s*ii|part\s*iii|\bii\b|\biii\b)\b/.test(normCandidate)) {
+            return false;
+        }
     }
-  }
 
-  return docs.map((doc) => ({
-    id: `archive:${doc.identifier}`,
-    type: 'movie',
-    name: doc.title || doc.identifier,
-    poster: `https://archive.org/services/img/${doc.identifier}`,
-    description: (doc.description || '').toString().slice(0, 300) || `Archive.org item: ${doc.identifier}`,
-    releaseInfo: doc.year ? String(doc.year) : undefined,
-    background: `https://archive.org/services/img/${doc.identifier}`
-  }));
-}
-
-// ---------- Conversion IMDb -> Archive ----------
-
-async function getExpectedTitle(identifier) {
-  if (!identifier.startsWith('tt')) return '';
-  try {
-    const res = await fetchWithTimeout(`https://v3-cinemeta.strem.io/meta/movie/${identifier}.json`, 4000);
-    if (!res.ok) return '';
-    const data = await res.json();
-    return data?.meta?.name || '';
-  } catch (e) {
-    console.log('Cinemeta failed:', e.message);
-    return '';
-  }
-}
-
-async function imdbToArchiveIdentifier(imdbId) {
-  if (imdbId.startsWith('archive:')) return imdbId.replace('archive:', '');
-  if (!imdbId.startsWith('tt')) return null;
-
-  const title = await getExpectedTitle(imdbId);
-  if (!title) return null;
-
-  const cleanTitle = title.replace(/[^\w\s]/g, ' ').trim();
-  console.log(`IMDb ${imdbId} -> "${cleanTitle}"`);
-
-  // Recherche large : le titre + movies
-  try {
-    const docs = await fetchSearch(`${cleanTitle} AND mediatype:movies`, 1);
-    if (docs.length > 0) return docs[0].identifier;
-  } catch (e) {
-    console.log('Archive search (title) failed:', e.message);
-  }
-
-  // Fallback : juste le titre
-  try {
-    const docs = await fetchSearch(cleanTitle, 1);
-    if (docs.length > 0) return docs[0].identifier;
-  } catch (e) {
-    console.log('Archive search (fallback) failed:', e.message);
-  }
-
-  return null;
-}
-
-// ---------- Streams ----------
-
-async function getStreams(identifier, expectedTitle = '') {
-  const cleanId = await imdbToArchiveIdentifier(identifier);
-  if (!cleanId) {
-    console.log(`No Archive match for ${identifier}`);
-    return [];
-  }
-
-  let data;
-  try {
-    const res = await fetchWithTimeout(`https://archive.org/metadata/${cleanId}`, 6000);
-    if (!res.ok) return [];
-    data = await res.json();
-  } catch (e) {
-    console.log('Metadata fetch failed:', e.message);
-    return [];
-  }
-
-  const files = data?.files || [];
-  const keywords = expectedTitle
-    .toLowerCase()
-    .replace(/[^\w\s]/g, ' ')
-    .split(/\s+/)
-    .filter(w => w.length > 3);
-
-  // Filtre principal : .mp4 uniquement, mots-clés du titre, taille > 100 MB
-  let videos = files.filter((f) => {
-    const name = (f.name || '').toLowerCase();
-    if (!name.endsWith('.mp4')) return false;
-    if (keywords.length > 0 && !keywords.some(kw => name.includes(kw))) return false;
-    if (Number(f.size || 0) < 100 * 1024 * 1024) return false;
     return true;
-  });
-
-  // Fallback : si le filtre a tout supprimé, on prend tous les .mp4 > 100 MB
-  if (videos.length === 0) {
-    videos = files.filter((f) => {
-      const name = (f.name || '').toLowerCase();
-      return name.endsWith('.mp4') && Number(f.size || 0) > 100 * 1024 * 1024;
-    });
-  }
-
-  // Dernier recours : tous les .mp4, quelle que soit la taille
-  if (videos.length === 0) {
-    videos = files.filter((f) => (f.name || '').toLowerCase().endsWith('.mp4'));
-  }
-
-  videos.sort((a, b) => {
-    const qa = QUALITY_RANK[extractQuality(a.name, a.format)];
-    const qb = QUALITY_RANK[extractQuality(b.name, b.format)];
-    if (qb !== qa) return qb - qa;
-    return Number(b.size || 0) - Number(a.size || 0);
-  });
-
-  return videos.map((file) => ({
-    url: `https://archive.org/download/${cleanId}/${encodeURIComponent(file.name)}`,
-    name: 'Archive.org',
-    title: `▶ ${extractQuality(file.name, file.format).toUpperCase()} · ${humanSize(file.size)}\n${file.name}`,
-    behaviorHints: { notWebReady: false, bingeGroup: `archive-${cleanId}` }
-  }));
 }
 
-// ---------- Handlers ----------
+// Récupère et filtre intelligemment les flux vidéo d'une archive
+async function getStreamsFromIA(identifier, targetTitle = null, targetYear = null, imdbId = null) {
+    try {
+        const metadataUrl = `https://archive.org/metadata/${identifier}`;
+        const response = await axios.get(metadataUrl, { timeout: 6000 });
+        const meta = response.data.metadata || {};
+        const files = response.data.files || [];
 
-async function handleCatalog(type, id, extra, res) {
-  const search = extra.search || '';
-  const skip = parseInt(extra.skip || '0', 10) || 0;
-  if (!search) return res.status(200).json({ metas: [] });
-  try {
-    const metas = await searchArchive(search, skip);
-    console.log(`Catalog "${search}" -> ${metas.length}`);
-    return res.status(200).json({ metas });
-  } catch (err) {
-    console.error('Catalog error:', err);
-    return res.status(200).json({ metas: [] });
-  }
+        const archiveTitle = Array.isArray(meta.title) ? meta.title[0] : (meta.title || identifier);
+        const archiveDesc = JSON.stringify(meta).toLowerCase();
+        
+        // Vérifie si l'archive mentionne explicitement l'ID IMDb (ex: tt0068646)
+        const hasImdbMatch = imdbId ? archiveDesc.includes(imdbId.toLowerCase()) : false;
+        const archiveMatchesTitle = targetTitle ? isMatch(archiveTitle + " " + identifier, targetTitle, targetYear) : true;
+
+        const videoFiles = files.filter(f => {
+            if (!f.name) return false;
+            const lowerName = f.name.toLowerCase();
+
+            // Ignorer les fichiers dérivés en double générés par IA (.ia.mp4)
+            if (lowerName.endsWith(".ia.mp4")) return false;
+
+            const isVideoExt = lowerName.endsWith(".mp4") || lowerName.endsWith(".mkv") || lowerName.endsWith(".avi") || lowerName.endsWith(".ogv");
+            if (!isVideoExt) return false;
+
+            // Exclure bandes-annonces, reviews, commentaires, etc.
+            const isJunk = /(trailer|sample|teaser|clip|advertisement|commentary|review|behind the scenes|deleted scenes|bloopers|making of)/i.test(lowerName);
+            if (isJunk) return false;
+
+            // Taille minimale : 150 Mo pour garantir un vrai long-métrage
+            const fileSize = parseInt(f.size || "0", 10);
+            if (fileSize < 150 * 1024 * 1024) return false;
+
+            // Si on cherche un film précis (via IMDb), vérifier la correspondance
+            if (targetTitle) {
+                const fileMatchesTitle = isMatch(f.name, targetTitle, targetYear);
+                // Le fichier lui-même correspond, OU l'archive entière correspond (et le fichier n'est pas le film d'un autre)
+                if (!fileMatchesTitle && !(archiveMatchesTitle && !hasImdbMatch ? false : archiveMatchesTitle)) {
+                    return false;
+                }
+            }
+
+            return true;
+        });
+
+        // Trier par taille décroissante (1080p MKV avant 480p MP4)
+        videoFiles.sort((a, b) => parseInt(b.size || "0", 10) - parseInt(a.size || "0", 10));
+
+        return videoFiles.map(file => {
+            const sizeBytes = parseInt(file.size || "0", 10);
+            const sizeGB = (sizeBytes / (1024 * 1024 * 1024)).toFixed(1);
+            const sizeDisplay = sizeGB >= 1 ? `${sizeGB} GB` : `${Math.round(sizeBytes / (1024 * 1024))} MB`;
+            const ext = file.name.split('.').pop().toUpperCase();
+
+            // Détection qualité et codec
+            const infoStr = (file.name + " " + archiveTitle).toLowerCase();
+            let quality = "SD / HD";
+            if (infoStr.includes("2160p") || infoStr.includes("4k")) quality = "4K";
+            else if (infoStr.includes("1080p")) quality = "1080p";
+            else if (infoStr.includes("720p")) quality = "720p";
+            else if (infoStr.includes("480p") || infoStr.includes("dvd")) quality = "480p";
+
+            let codec = "";
+            if (infoStr.includes("hevc") || infoStr.includes("x265") || infoStr.includes("h265")) codec = " · HEVC";
+            else if (infoStr.includes("x264") || infoStr.includes("h264") || infoStr.includes("h.264")) codec = " · H.264";
+
+            const cleanFileName = file.name.split('/').pop();
+            const displayTitle = cleanFileName.length > 12 ? cleanFileName : archiveTitle;
+            const matchBadge = hasImdbMatch ? "◎ 100% match · IMDb ✓" : "◎ Title match";
+
+            return {
+                name: "🏛 Archive\n〈Full Movie〉",
+                title: `✎ ${displayTitle}\n◈ ${sizeDisplay} · ${ext}\n◆ ${quality}${codec}\n${matchBadge}`,
+                url: `https://archive.org/download/${identifier}/${file.name.split('/').map(encodeURIComponent).join('/')}`,
+                _hasImdb: hasImdbMatch,
+                _size: sizeBytes
+            };
+        });
+    } catch (error) {
+        return [];
+    }
 }
 
-async function handleStream(type, id, res) {
-  try {
-    const expectedTitle = await getExpectedTitle(id);
-    const streams = await getStreams(id, expectedTitle);
-    console.log(`Streams "${id}" -> ${streams.length}`);
-    return res.status(200).json({ streams });
-  } catch (err) {
-    console.error('Stream error:', err);
-    return res.status(200).json({ streams: [] });
-  }
-}
+// Gestion du catalogue et de la recherche manuelle
+builder.defineCatalogHandler(async ({ type, id, extra }) => {
+    try {
+        // Recherche dans mediatype:movies (inclut Community Video / opensource_movies et feature_films)
+        let searchQuery = "mediatype:(movies)";
 
-// ---------- Routeur : manifeste renvoyé IMMÉDIATEMENT ----------
+        if (extra && extra.search) {
+            searchQuery += ` AND title:(${extra.search})`;
+        } else {
+            searchQuery += " AND (collection:(feature_films) OR collection:(opensource_movies))";
+        }
 
-export default async function handler(req, res) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  if (req.method === 'OPTIONS') return res.status(204).end();
+        const url = `https://archive.org/advancedsearch.php?q=${encodeURIComponent(searchQuery)}&fl[]=identifier,title,description,year&sort[]=downloads+desc&rows=30&output=json`;
+        const response = await axios.get(url);
+        const docs = response.data.response.docs || [];
 
-  const host = req.headers['x-forwarded-host'] || req.headers.host;
-  const proto = req.headers['x-forwarded-proto'] || 'https';
-  const url = new URL(req.url, `${proto}://${host}`);
-  const path = url.pathname;
+        const metas = docs.map(doc => ({
+            id: `ia:${doc.identifier}`,
+            type: "movie",
+            name: Array.isArray(doc.title) ? doc.title[0] : (doc.title || "Titre inconnu"),
+            description: Array.isArray(doc.description) ? doc.description[0] : (doc.description || "Aucune description disponible."),
+            releaseInfo: doc.year ? String(doc.year) : undefined,
+            poster: `https://archive.org/services/img/${doc.identifier}`
+        }));
 
-  // ⚠️ Manifeste : réponse immédiate, AUCUN await avant
-  if (path.endsWith('/manifest.json') || path === '/') {
-    return res.status(200).json(manifest);
-  }
+        return { metas };
+    } catch (error) {
+        console.error("Erreur catalogue:", error.message);
+        return { metas: [] };
+    }
+});
 
-  if (path.includes('/catalog/')) {
-    const parts = path.split('/').filter(Boolean);
-    const extraStr = (parts[3] || '').replace(/\.json$/, '');
-    const extra = {};
-    new URLSearchParams(extraStr).forEach((v, k) => (extra[k] = v));
-    return handleCatalog(parts[1], parts[2], extra, res);
-  }
+// Gestion des flux vidéo (Stream)
+builder.defineStreamHandler(async ({ type, id }) => {
+    if (type !== "movie") {
+        return { streams: [] };
+    }
 
-  if (path.includes('/stream/')) {
-    const parts = path.split('/').filter(Boolean);
-    const id = decodeURIComponent((parts[2] || '').replace(/\.json$/, ''));
-    return handleStream(parts[1], id, res);
-  }
+    if (id.startsWith("ia:")) {
+        const identifier = id.replace("ia:", "");
+        const streams = await getStreamsFromIA(identifier);
+        return { streams };
+    }
 
-  return res.status(404).json({ err: 'not found', path });
-}
+    if (id.startsWith("tt")) {
+        try {
+            const cinemetaRes = await axios.get(`https://v3-cinemeta.strem.io/meta/movie/${id}.json`);
+            const movieMeta = cinemetaRes.data && cinemetaRes.data.meta;
+
+            if (!movieMeta || !movieMeta.name) {
+                return { streams: [] };
+            }
+
+            const title = movieMeta.name;
+            const year = movieMeta.year ? String(movieMeta.year).substring(0, 4) : null;
+            const cleanTitle = title.replace(/[^\w\s]/g, " ").trim();
+
+            // Recherche combinée : par ID IMDb exact OU par titre dans mediatype:movies (Community Video inclus)
+            const searchQuery = `mediatype:(movies) AND (${id} OR title:("${cleanTitle}"))`;
+            const searchUrl = `https://archive.org/advancedsearch.php?q=${encodeURIComponent(searchQuery)}&fl[]=identifier,title,year&sort[]=downloads+desc&rows=12&output=json`;
+            
+            const searchRes = await axios.get(searchUrl);
+            const docs = searchRes.data.response.docs || [];
+
+            // Exécuter les requêtes de métadonnées en parallèle pour être ultra-rapide sur Vercel
+            const streamPromises = docs.map(doc => getStreamsFromIA(doc.identifier, title, year, id));
+            const results = await Promise.all(streamPromises);
+            let allStreams = results.flat();
+
+            // Trier : d'abord les matchs IMDb certifiés, puis par taille de fichier
+            allStreams.sort((a, b) => {
+                if (a._hasImdb !== b._hasImdb) return b._hasImdb ? 1 : -1;
+                return b._size - a._size;
+            });
+
+            // Nettoyer les propriétés internes et supprimer les doublons d'URL
+            const uniqueStreams = [];
+            const seenUrls = new Set();
+            for (const s of allStreams) {
+                if (!seenUrls.has(s.url)) {
+                    seenUrls.add(s.url);
+                    delete s._hasImdb;
+                    delete s._size;
+                    uniqueStreams.push(s);
+                }
+            }
+
+            return { streams: uniqueStreams };
+        } catch (error) {
+            console.error("Erreur recherche IMDb -> IA:", error.message);
+            return { streams: [] };
+        }
+    }
+
+    return { streams: [] };
+});
+
+// Configuration Express
+const app = express();
+app.use(express.static(path.join(__dirname, "../public")));
+
+const addonInterface = builder.getInterface();
+app.use(getRouter(addonInterface));
+
+module.exports = app;
