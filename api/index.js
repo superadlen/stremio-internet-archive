@@ -1,10 +1,11 @@
 const { addonBuilder, getRouter } = require("stremio-addon-sdk");
 const express = require("express");
 const axios = require("axios");
+const path = require("path");
 
 const builder = new addonBuilder({
     id: "org.internetarchive.movies",
-    version: "1.1.0",
+    version: "1.2.0", // Passage à la version 1.2.0
     name: "Internet Archive Movies",
     description: "Recherche et diffuse des films du domaine public et archives depuis Internet Archive.",
     resources: ["catalog", "stream"],
@@ -17,7 +18,6 @@ const builder = new addonBuilder({
             extra: [{ name: "search", isRequired: false }]
         }
     ],
-    // Ajout de "tt" pour réagir aussi aux fiches de films classiques (IMDb)
     idPrefixes: ["ia:", "tt"]
 });
 
@@ -28,10 +28,10 @@ async function getStreamsFromIA(identifier) {
         const response = await axios.get(metadataUrl);
         const files = response.data.files || [];
 
-        const videoFiles = files.filter(f =>
+        const videoFiles = files.filter(f => 
             f.name && (
-                f.name.toLowerCase().endsWith(".mp4") ||
-                f.name.toLowerCase().endsWith(".mkv") ||
+                f.name.toLowerCase().endsWith(".mp4") || 
+                f.name.toLowerCase().endsWith(".mkv") || 
                 f.name.toLowerCase().endsWith(".ogv")
             )
         );
@@ -50,7 +50,7 @@ async function getStreamsFromIA(identifier) {
 builder.defineCatalogHandler(async ({ type, id, extra }) => {
     try {
         let searchQuery = "mediatype:(movies)";
-
+        
         if (extra && extra.search) {
             searchQuery += ` AND title:(${extra.search})`;
         } else {
@@ -83,17 +83,14 @@ builder.defineStreamHandler(async ({ type, id }) => {
         return { streams: [] };
     }
 
-    // Cas 1 : Le film vient directement du catalogue Internet Archive (ia:...)
     if (id.startsWith("ia:")) {
         const identifier = id.replace("ia:", "");
         const streams = await getStreamsFromIA(identifier);
         return { streams };
     }
 
-    // Cas 2 : Le film vient d'une fiche classique Stremio / IMDb (tt...)
     if (id.startsWith("tt")) {
         try {
-            // 1. Récupérer le titre du film via Cinemeta (l'API publique de Stremio)
             const cinemetaRes = await axios.get(`https://v3-cinemeta.strem.io/meta/movie/${id}.json`);
             const movieMeta = cinemetaRes.data && cinemetaRes.data.meta;
 
@@ -101,13 +98,11 @@ builder.defineStreamHandler(async ({ type, id }) => {
                 return { streams: [] };
             }
 
-            // 2. Chercher ce titre exact sur Internet Archive
             const searchQuery = `mediatype:(movies) AND title:("${movieMeta.name}")`;
             const searchUrl = `https://archive.org/advancedsearch.php?q=${encodeURIComponent(searchQuery)}&fl[]=identifier&sort[]=downloads+desc&rows=3&output=json`;
             const searchRes = await axios.get(searchUrl);
             const docs = searchRes.data.response.docs || [];
 
-            // 3. Récupérer les vidéos des 3 meilleurs résultats trouvés
             let allStreams = [];
             for (const doc of docs) {
                 const streams = await getStreamsFromIA(doc.identifier);
@@ -124,8 +119,13 @@ builder.defineStreamHandler(async ({ type, id }) => {
     return { streams: [] };
 });
 
-// Configuration Express pour Vercel
+// Configuration Express
 const app = express();
+
+// Servir la page HTML statique située dans le dossier "public" pour la page d'accueil
+app.use(express.static(path.join(__dirname, "../public")));
+
+// Routeur de l'add-on Stremio
 const addonInterface = builder.getInterface();
 app.use(getRouter(addonInterface));
 
