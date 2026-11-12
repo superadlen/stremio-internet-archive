@@ -4,27 +4,31 @@ const express = require("express");
 const axios = require("axios");
 const path = require("path");
 
-// ============================================
-// INTERNET ARCHIVE MOVIES — VERSION 1.9.0
-// ============================================
+// ============================================================
+// INTERNET ARCHIVE MOVIES — VERSION 2.0.0
+// ============================================================
 
-const MIN_FILE_SIZE = Math.max(
-    50,
-    Number(process.env.MIN_FILE_SIZE_MB || 250)
-) * 1024 * 1024;
+const VERSION = "2.0.0";
+const HTTP_TIMEOUT = Number(process.env.HTTP_TIMEOUT_MS || 10000);
+const MIN_FILE_SIZE = Math.max(50, Number(process.env.MIN_FILE_SIZE_MB || 250)) * 1024 * 1024;
+const MAX_ARCHIVES = Math.max(10, Math.min(60, Number(process.env.MAX_ARCHIVES || 50)));
+const MAX_STREAMS = Math.max(5, Math.min(30, Number(process.env.MAX_STREAMS || 20)));
+const VERIFY_FILES = String(process.env.VERIFY_FILES || "true").toLowerCase() !== "false";
+const PREFERRED_LANGUAGES = ["English", "Français"];
 
-const MAX_ARCHIVES = Math.max(
-    5,
-    Math.min(30, Number(process.env.MAX_ARCHIVES || 15))
-);
-
-const HTTP_TIMEOUT = 8000;
+const http = axios.create({
+    timeout: HTTP_TIMEOUT,
+    headers: {
+        "User-Agent": "InternetArchiveMovies-Stremio/2.0.0"
+    },
+    maxRedirects: 5
+});
 
 const builder = new addonBuilder({
     id: "org.internetarchive.movies",
-    version: "1.9.0",
+    version: VERSION,
     name: "Internet Archive Movies",
-    description: "Films complets depuis Internet Archive.",
+    description: "Films Internet Archive avec recherche IMDb, contrôle des fichiers, langues et qualités.",
     resources: ["catalog", "stream"],
     types: ["movie"],
     catalogs: [{
@@ -36,9 +40,9 @@ const builder = new addonBuilder({
     idPrefixes: ["ia:", "tt"]
 });
 
-// ============================================
-// NORMALISATION
-// ============================================
+// ============================================================
+// NORMALISATION ET CORRESPONDANCE DES TITRES
+// ============================================================
 
 function normalizeText(value) {
     return String(value || "")
@@ -55,130 +59,170 @@ function getYear(value) {
     return match ? Number(match[1]) : null;
 }
 
-function titleMatches(candidate, targetTitle, targetYear) {
-    if (!targetTitle) return true;
+function coreWords(value) {
+    const ignored = new Set([
+        "the", "a", "an", "of", "and", "to",
+        "in", "on", "for", "film", "movie"
+    ]);
 
-    const candidateNorm = normalizeText(candidate);
-    const titleNorm = normalizeText(targetTitle);
-
-    if (!candidateNorm || !titleNorm) return false;
-
-    const candidateYear = getYear(candidate);
-
-    if (
-        targetYear &&
-        candidateYear &&
-        Math.abs(candidateYear - Number(targetYear)) > 1
-    ) {
-        return false;
-    }
-
-    if (candidateNorm === titleNorm) return true;
-
-    const candidateWords = candidateNorm.split(" ");
-    const words = titleNorm.split(" ").filter(w => w.length > 1);
-
-    if (!words.length) return candidateWords.includes(titleNorm);
-
-    return words.every(word => candidateWords.includes(word));
+    return normalizeText(value)
+        .split(" ")
+        .filter(word => word.length > 1 && !ignored.has(word));
 }
 
-function containsImdbId(metadata, imdbId) {
-    if (!imdbId || !metadata) return false;
+function titleMatchScore(candidate, targetTitle, targetYear) {
+    if (!targetTitle) {
+        return { score: 0, percent: 0, yearPenalty: false };
+    }
 
-    const values = [];
+    const candidateNorm = normalizeText(candidate);
+    const targetNorm = normalizeText(targetTitle);
+    const targetWords = [...new Set(coreWords(targetTitle))];
+    const candidateWords = new Set(coreWords(candidate));
 
-    for (const [key, value] of Object.entries(metadata)) {
-        if (/imdb|external|identifier/i.test(key)) {
-            values.push(value);
+    if (!candidateNorm || !targetNorm || !targetWords.length) {
+        return { score: 0, percent: 0, yearPenalty: false };
+    }
+
+    const matched = targetWords.filter(word => candidateWords.has(word)).length;
+    let ratio = matched / targetWords.length;
+
+    if (
+        candidateNorm.includes(targetNorm) ||
+        targetNorm.includes(candidateNorm)
+    ) {
+        ratio = Math.max(ratio, 0.96);
+    }
+
+    const candidateYear = getYear(candidate);
+    let yearPenalty = false;
+
+    if (targetYear && candidateYear) {
+        const delta = Math.abs(candidateYear - Number(targetYear));
+
+        if (delta === 0) ratio += 0.04;
+        else if (delta === 1) ratio -= 0.03;
+        else {
+            ratio -= 0.22;
+            yearPenalty = true;
         }
     }
 
-    return JSON.stringify(values)
-        .toLowerCase()
-        .includes(String(imdbId).toLowerCase());
+    ratio = Math.max(0, Math.min(1, ratio));
+
+    return {
+        score: ratio,
+        percent: Math.round(ratio * 100),
+        yearPenalty
+    };
 }
 
-// ============================================
-// LANGUE
-// ============================================
+function safeSearchText(value) {
+    return String(value || "")
+        .replace(/[+\-&|!(){}\[\]^"~*?:\\/]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+}
 
-function detectLanguage(text) {
-    const value = String(text || "").toLowerCase();
+// ============================================================
+// LANGUES
+// ============================================================
 
-    if (/\b(french|français|vf|vostfr)\b/.test(value))
+function detectLanguage(value) {
+    const text = normalizeText(value);
+
+    if (/\b(french|francais|vf|vostfr|french dub|french dubbed)\b/.test(text))
         return "Français";
 
-    if (/\b(english|anglais|eng)\b/.test(value))
+    if (/\b(english|anglais|eng|original audio)\b/.test(text))
         return "English";
 
-    if (/\b(spanish|español|esp)\b/.test(value))
-        return "Español";
+    if (/\b(hindi|indian dubbed)\b/.test(text))
+        return "Hindi (doublé)";
 
-    if (/\b(german|deutsch)\b/.test(value))
-        return "Deutsch";
+    if (/\b(arabic|arab|arabe)\b/.test(text))
+        return "Arabe (doublé)";
 
-    if (/\b(italian|italiano)\b/.test(value))
-        return "Italiano";
+    if (/\b(spanish|espanol|castellano|latino)\b/.test(text))
+        return "Español (doublé)";
+
+    if (/\b(german|deutsch)\b/.test(text))
+        return "Deutsch (doublé)";
+
+    if (/\b(italian|italiano)\b/.test(text))
+        return "Italiano (doublé)";
+
+    if (/\b(russian|russian dubbed)\b/.test(text))
+        return "Russe (doublé)";
+
+    if (/\b(tamil|telugu|bengali|korean|japanese|portuguese|turkish)\b/.test(text))
+        return "Autre langue (doublé)";
 
     return "Langue non précisée";
 }
 
-// ============================================
-// QUALITÉ VIDÉO
-// ============================================
+function languageRank(language) {
+    if (PREFERRED_LANGUAGES.includes(language)) return 0;
+    if (language === "Langue non précisée") return 1;
+    return 2;
+}
 
-function qualityInfo(filename, archiveTitle) {
-    const value =
-        `${filename || ""} ${archiveTitle || ""}`.toLowerCase();
+// ============================================================
+// QUALITÉ VIDÉO ET CODEC
+// ============================================================
 
-    let quality = "Qualité non précisée";
-    let score = 0;
+function getQuality(filename, archiveTitle) {
+    const text = `${filename || ""} ${archiveTitle || ""}`.toLowerCase();
 
-    if (/2160p|4k|uhd/.test(value)) {
+    let quality = "SD/HD";
+    let score = 10;
+
+    if (/2160p|4k|uhd/.test(text)) {
         quality = "4K";
         score = 40;
-    } else if (/1080p|1920x1080/.test(value)) {
+    } else if (/1080p|1920x1080/.test(text)) {
         quality = "1080p";
         score = 30;
-    } else if (/720p|1280x720/.test(value)) {
+    } else if (/720p|1280x720/.test(text)) {
         quality = "720p";
         score = 20;
-    } else if (/480p|854x480/.test(value)) {
+    } else if (/480p|854x480/.test(text)) {
         quality = "480p";
-        score = 10;
-    } else if (/360p/.test(value)) {
+        score = 8;
+    } else if (/360p/.test(text)) {
         quality = "360p";
-        score = 5;
+        score = 4;
     }
 
     let source = "";
 
-    if (/web[ ._-]?dl|webrip/.test(value))
-        source = "WEB";
-    else if (/blu[ ._-]?ray|bdrip/.test(value))
+    if (/web[ ._-]?dl|webrip/.test(text))
+        source = "WEB-DL";
+    else if (/blu[ ._-]?ray|bdrip|brrip/.test(text))
         source = "BluRay";
-    else if (/dvdrip|dvd/.test(value))
-        source = "DVD";
-    else if (/hdtv/.test(value))
+    else if (/dvdrip|dvd/.test(text))
+        source = "DVDRip";
+    else if (/hdtv/.test(text))
         source = "HDTV";
 
     let codec = "";
 
-    if (/hevc|h265|x265/.test(value))
+    if (/hevc|h265|x265/.test(text))
         codec = "HEVC";
-    else if (/avc|h264|x264/.test(value))
+    else if (/avc|h264|x264/.test(text))
         codec = "H.264";
 
     return { quality, score, source, codec };
 }
 
 function formatSize(bytes) {
-    const gb = bytes / (1024 ** 3);
+    const size = Number(bytes) || 0;
 
-    return gb >= 1
-        ? `${gb.toFixed(2)} GB`
-        : `${Math.round(bytes / (1024 ** 2))} MB`;
+    if (size >= 1024 ** 3) {
+        return `${(size / (1024 ** 3)).toFixed(1)} GB`;
+    }
+
+    return `${Math.round(size / (1024 ** 2))} MB`;
 }
 
 function encodeArchivePath(filename) {
@@ -188,53 +232,231 @@ function encodeArchivePath(filename) {
         .join("/");
 }
 
-// ============================================
-// VÉRIFICATION FICHIER DISTANT
-// ============================================
+// ============================================================
+// DURÉE VIDÉO
+// ============================================================
 
-async function isRemoteFileAvailable(url) {
-    try {
-        const head = await axios.head(url, {
-            timeout: 5000,
-            maxRedirects: 5,
-            validateStatus: () => true
-        });
+function parseDuration(value) {
+    if (value == null || value === "") return null;
 
-        if (head.status >= 200 && head.status < 300) {
-            const length = head.headers["content-length"];
-
-            return length == null || Number(length) > 0;
-        }
-
-        if (![403, 405, 501].includes(head.status)) {
-            return false;
-        }
-    } catch (_) {
-        // Certains serveurs IA refusent HEAD.
+    if (
+        typeof value === "number" ||
+        /^\d+(\.\d+)?$/.test(String(value).trim())
+    ) {
+        const seconds = Number(value);
+        return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
     }
+
+    const parts = String(value).trim().split(":").map(Number);
+
+    if (parts.some(part => !Number.isFinite(part))) return null;
+
+    if (parts.length === 3) {
+        return parts[0] * 3600 + parts[1] * 60 + parts[2];
+    }
+
+    if (parts.length === 2) {
+        return parts[0] * 60 + parts[1];
+    }
+
+    return null;
+}
+
+function formatDuration(seconds) {
+    if (!seconds || seconds <= 0) return "Durée non indiquée";
+
+    const minutes = Math.round(seconds / 60);
+    const hours = Math.floor(minutes / 60);
+    const remaining = minutes % 60;
+
+    return hours
+        ? `${hours}h ${String(remaining).padStart(2, "0")}m`
+        : `${minutes} min`;
+}
+
+function getDuration(metadata, file) {
+    const candidates = [
+        file && file.length,
+        file && file.runtime,
+        metadata && metadata.runtime,
+        metadata && metadata.length,
+        metadata && metadata.duration
+    ];
+
+    for (const value of candidates) {
+        const parsed = parseDuration(value);
+        if (parsed) return parsed;
+    }
+
+    return null;
+}
+
+// ============================================================
+// RECHERCHE INTERNET ARCHIVE
+// ============================================================
+
+async function advancedSearch(query, rows = MAX_ARCHIVES) {
+    const url = "https://archive.org/advancedsearch.php";
+    const params = new URLSearchParams();
+
+    params.set("q", query);
+
+    for (const field of [
+        "identifier",
+        "title",
+        "year",
+        "downloads",
+        "description"
+    ]) {
+        params.append("fl[]", field);
+    }
+
+    params.append("sort[]", "downloads desc");
+    params.set("rows", String(rows));
+    params.set("page", "1");
+    params.set("output", "json");
+
+    const response = await http.get(
+        `${url}?${params.toString()}`
+    );
+
+    return response.data?.response?.docs || [];
+}
+
+async function searchArchiveItems(title, year, imdbId) {
+    const cleanTitle = safeSearchText(title);
+    const words = [...new Set(coreWords(cleanTitle))];
+
+    if (!cleanTitle || !words.length) return [];
+
+    const queries = [];
+
+    // Recherche du titre complet.
+    queries.push(
+        `mediatype:movies AND title:"${cleanTitle}"`
+    );
+
+    // Recherche par tous les mots importants.
+    if (words.length >= 2) {
+        queries.push(
+            `mediatype:movies AND title:(${words.join(" AND ")})`
+        );
+
+        queries.push(
+            `mediatype:movies AND (${words.map(word => `title:${word}`).join(" AND ")})`
+        );
+    }
+
+    // Recherche élargie dans les métadonnées.
+    if (words.length >= 2) {
+        queries.push(
+            `mediatype:movies AND (${words.slice(0, 2).map(word => `(${word})`).join(" AND ")})`
+        );
+    }
+
+    // Recherche secondaire IMDb.
+    if (imdbId) {
+        queries.push(
+            `mediatype:movies AND identifier:${imdbId}`
+        );
+    }
+
+    const results = await Promise.allSettled(
+        [...new Set(queries)].map(query =>
+            advancedSearch(query, MAX_ARCHIVES)
+        )
+    );
+
+    const byIdentifier = new Map();
+
+    for (const result of results) {
+        if (result.status !== "fulfilled") continue;
+
+        for (const doc of result.value) {
+            if (!doc.identifier) continue;
+
+            const previous = byIdentifier.get(doc.identifier);
+
+            if (
+                !previous ||
+                Number(doc.downloads || 0) > Number(previous.downloads || 0)
+            ) {
+                byIdentifier.set(doc.identifier, doc);
+            }
+        }
+    }
+
+    return [...byIdentifier.values()]
+        .map(doc => {
+            const docTitle = Array.isArray(doc.title)
+                ? doc.title[0]
+                : (doc.title || doc.identifier);
+
+            const match = titleMatchScore(
+                `${docTitle} ${doc.identifier}`,
+                title,
+                year
+            );
+
+            return {
+                ...doc,
+                _title: docTitle,
+                _match: match
+            };
+        })
+        .filter(doc => {
+            return (
+                doc._match.score >= 0.55 ||
+                String(doc.identifier).toLowerCase().includes(
+                    String(imdbId || "__none__").toLowerCase()
+                )
+            );
+        })
+        .sort((a, b) => {
+            if (a._match.score !== b._match.score) {
+                return b._match.score - a._match.score;
+            }
+
+            return Number(b.downloads || 0) - Number(a.downloads || 0);
+        })
+        .slice(0, MAX_ARCHIVES);
+}
+
+// ============================================================
+// VÉRIFICATION DES FICHIERS
+// ============================================================
+
+async function verifyRemoteFile(url) {
+    if (!VERIFY_FILES) return true;
 
     let response;
 
     try {
-        response = await axios.get(url, {
+        response = await http.get(url, {
             responseType: "stream",
             headers: { Range: "bytes=0-0" },
-            timeout: 6000,
-            maxRedirects: 5,
+            timeout: 7000,
             validateStatus: () => true
         });
 
         const valid =
-            response.status === 200 ||
-            response.status === 206;
+            response.status === 206 ||
+            response.status === 200;
 
-        if (response.data?.destroy) {
+        if (
+            response.data &&
+            typeof response.data.destroy === "function"
+        ) {
             response.data.destroy();
         }
 
         return valid;
-    } catch (_) {
-        if (response?.data?.destroy) {
+
+    } catch (error) {
+        if (
+            response?.data &&
+            typeof response.data.destroy === "function"
+        ) {
             response.data.destroy();
         }
 
@@ -242,85 +464,85 @@ async function isRemoteFileAvailable(url) {
     }
 }
 
-// ============================================
-// LIMITATION DES REQUÊTES SIMULTANÉES
-// ============================================
-
 async function mapLimit(items, limit, worker) {
-    const results = new Array(items.length);
-    let next = 0;
+    const output = new Array(items.length);
+    let cursor = 0;
 
-    const runners = Array.from(
+    const workers = Array.from(
         { length: Math.min(limit, items.length) },
         async () => {
             while (true) {
-                const index = next++;
+                const index = cursor++;
 
                 if (index >= items.length) return;
 
                 try {
-                    results[index] = await worker(items[index], index);
+                    output[index] = await worker(items[index], index);
                 } catch (_) {
-                    results[index] = null;
+                    output[index] = null;
                 }
             }
         }
     );
 
-    await Promise.all(runners);
+    await Promise.all(workers);
 
-    return results;
+    return output;
 }
 
-// ============================================
-// RECHERCHE DES VIDÉOS INTERNET ARCHIVE
-// ============================================
+// ============================================================
+// EXTRACTION DES STREAMS INTERNET ARCHIVE
+// ============================================================
 
 async function getStreamsFromIA(
     identifier,
     targetTitle = null,
     targetYear = null,
-    imdbId = null
+    imdbId = null,
+    searchDoc = null
 ) {
     try {
-        const metadataResponse = await axios.get(
-            `https://archive.org/metadata/${encodeURIComponent(identifier)}`,
-            { timeout: HTTP_TIMEOUT }
+        const response = await http.get(
+            `https://archive.org/metadata/${encodeURIComponent(identifier)}`
         );
 
-        const metadata = metadataResponse.data?.metadata;
-        const files = metadataResponse.data?.files;
-
-        if (!metadata || !Array.isArray(files)) return [];
+        const metadata = response.data?.metadata || {};
+        const files = Array.isArray(response.data?.files)
+            ? response.data.files
+            : [];
 
         const archiveTitle = Array.isArray(metadata.title)
             ? metadata.title[0]
-            : (metadata.title || identifier);
+            : (metadata.title || searchDoc?._title || identifier);
 
-        const imdbMatch = containsImdbId(metadata, imdbId);
+        const imdbText = JSON.stringify(metadata).toLowerCase();
 
-        const archiveTitleMatch = targetTitle
-            ? titleMatches(
-                `${archiveTitle} ${identifier}`,
-                targetTitle,
-                targetYear
-            )
-            : true;
+        const imdbMatch = Boolean(
+            imdbId && imdbText.includes(String(imdbId).toLowerCase())
+        );
 
+        const archiveMatch = titleMatchScore(
+            `${archiveTitle} ${identifier}`,
+            targetTitle || archiveTitle,
+            targetYear
+        );
+
+        const archiveDownloads = Number(searchDoc?.downloads || 0);
+
+        // Filtrage des fichiers vidéo.
         const candidates = files.filter(file => {
-            if (!file || !file.name) return false;
+            if (!file?.name) return false;
 
             const name = String(file.name);
             const lower = name.toLowerCase();
 
-            if (lower.endsWith(".ia.mp4")) return false;
-
-            if (!/\.(mp4|mkv|m4v|avi|webm|ogv)$/i.test(lower)) {
+            // IMPORTANT : les fichiers .ia.mp4 sont acceptés.
+            if (!/\.(mp4|mkv|m4v|avi|webm|ogv|mov)$/i.test(lower)) {
                 return false;
             }
 
             if (
-                /(trailer|sample|teaser|clip|advertisement|commentary|review|behind[ ._-]?the[ ._-]?scenes|deleted[ ._-]?scenes|bloopers|making[ ._-]?of|preview|intro|outro)/i.test(lower)
+                /(trailer|sample|teaser|clip|advertisement|commentary|review|behind[ ._-]?the[ ._-]?scenes|deleted[ ._-]?scenes|bloopers|making[ ._-]?of|preview|proof|thumbnail)/i.test(lower)
             ) {
                 return false;
             }
@@ -331,219 +553,251 @@ async function getStreamsFromIA(
                 return false;
             }
 
-            if (
-                targetTitle &&
-                !archiveTitleMatch &&
-                !imdbMatch &&
-                !titleMatches(name, targetTitle, targetYear)
-            ) {
-                return false;
+            if (targetTitle) {
+                const fileMatch = titleMatchScore(
+                    `${name} ${archiveTitle}`,
+                    targetTitle,
+                    targetYear
+                );
+
+                if (
+                    fileMatch.score < 0.48 &&
+                    archiveMatch.score < 0.68 &&
+                    !imdbMatch
+                ) {
+                    return false;
+                }
             }
 
             return true;
         });
 
-        const rankedCandidates = candidates
-            .map(file => {
-                const size = Number(file.size || 0);
-                const quality = qualityInfo(file.name, archiveTitle);
+        // Préparation des résultats.
+        const prepared = candidates.map(file => {
+            const filename = String(file.name).split("/").pop();
+            const size = Number(file.size || 0);
 
-                const fileTitleMatch = targetTitle
-                    ? titleMatches(file.name, targetTitle, targetYear)
-                    : false;
+            const match = titleMatchScore(
+                `${filename} ${archiveTitle}`,
+                targetTitle || archiveTitle,
+                targetYear
+            );
 
-                return {
-                    file,
-                    size,
-                    quality,
-                    fileTitleMatch
-                };
-            })
-            .sort((a, b) => {
-                if (a.quality.score !== b.quality.score) {
-                    return b.quality.score - a.quality.score;
-                }
+            const quality = getQuality(filename, archiveTitle);
 
-                return b.size - a.size;
-            })
-            .slice(0, 6);
+            const language = detectLanguage(
+                `${filename} ${archiveTitle} ${metadata.language || ""}`
+            );
 
-        const verified = await mapLimit(
-            rankedCandidates,
-            3,
+            const duration = getDuration(metadata, file);
+
+            return {
+                file,
+                filename,
+                size,
+                match,
+                quality,
+                language,
+                duration
+            };
+        })
+        .filter(item => {
+            return !item.duration || item.duration >= 45 * 60;
+        })
+        .sort((a, b) => {
+            // Français / anglais d'abord.
+            if (languageRank(a.language) !== languageRank(b.language)) {
+                return languageRank(a.language) - languageRank(b.language);
+            }
+
+            if (a.match.score !== b.match.score) {
+                return b.match.score - a.match.score;
+            }
+
+            if (a.quality.score !== b.quality.score) {
+                return b.quality.score - a.quality.score;
+            }
+
+            return b.size - a.size;
+        })
+        .slice(0, 8);
+
+        // Vérification de disponibilité des fichiers.
+        const checked = await mapLimit(
+            prepared,
+            4,
             async item => {
                 const url =
                     `https://archive.org/download/${encodeURIComponent(identifier)}/${encodeArchivePath(item.file.name)}`;
 
-                return await isRemoteFileAvailable(url)
-                    ? { ...item, url }
-                    : null;
+                if (!(await verifyRemoteFile(url))) return null;
+
+                return { ...item, url };
             }
         );
 
-        return verified.filter(Boolean).map(item => {
-            const filename = String(item.file.name).split("/").pop();
-            const ext = filename.split(".").pop().toUpperCase();
-
-            const language = detectLanguage(
-                `${filename} ${archiveTitle} ${JSON.stringify(metadata.language || "")}`
-            );
+        return checked.filter(Boolean).map(item => {
+            const ext = item.filename.split(".").pop().toUpperCase();
 
             const details = [item.quality.quality];
 
-            if (item.quality.source) {
-                details.push(item.quality.source);
-            }
+            if (item.quality.source) details.push(item.quality.source);
+            if (item.quality.codec) details.push(item.quality.codec);
 
-            if (item.quality.codec) {
-                details.push(item.quality.codec);
-            }
+            const durationText = item.duration
+                ? `${formatDuration(item.duration)} ✓`
+                : "Durée non vérifiée";
+
+            const matchPercent = imdbMatch
+                ? 100
+                : Math.max(item.match.percent, archiveMatch.percent);
 
             const matchLabel = imdbMatch
-                ? "IMDb confirmé"
-                : item.fileTitleMatch
-                    ? "Titre du fichier correspondant"
-                    : "Titre de l'archive correspondant";
+                ? "IMDb match"
+                : `${matchPercent}% match`;
+
+            const downloadsLabel = archiveDownloads > 0
+                ? ` · ⇩ ${archiveDownloads.toLocaleString("en-US")}`
+                : "";
 
             return {
-                name: "🏛 INTERNET ARCHIVE",
+                name: "🏛 Archive\n〈Full Movie〉",
 
                 title:
-                    `🎬 ${filename}\n` +
-                    `📦 ${formatSize(item.size)} · ${ext}\n` +
-                    `🎞 ${details.join(" · ")}\n` +
-                    `🌍 ${language} · ${matchLabel}`,
+                    `✎ ${item.filename}\n` +
+                    `◈ ${durationText} · ${formatSize(item.size)} · ${ext}\n` +
+                    `◆ ${details.join(" · ")}\n` +
+                    `◐ ${item.language}\n` +
+                    `◎ ${matchLabel}${downloadsLabel}`,
 
                 url: item.url,
 
                 behaviorHints: {
-                    filename,
+                    filename: item.filename,
                     videoSize: item.size,
-                    notWebReady: ext !== "MP4"
+                    notWebReady: false
                 },
 
-                _imdbMatch: imdbMatch,
-                _titleMatch: item.fileTitleMatch,
-                _qualityScore: item.quality.score,
+                _imdb: imdbMatch,
+                _match: matchPercent,
+                _languageRank: languageRank(item.language),
+                _quality: item.quality.score,
+                _downloads: archiveDownloads,
                 _size: item.size
             };
         });
 
     } catch (error) {
         console.error(
-            `[IA metadata] ${identifier}:`,
-            error.message
+            `[IA metadata] ${identifier}: ${error.message}`
         );
 
         return [];
     }
 }
 
-// ============================================
-// NETTOYAGE DE LA RECHERCHE
-// ============================================
+// ============================================================
+// NETTOYAGE DES CHAMPS INTERNES
+// ============================================================
 
-function cleanSearchText(value) {
-    return String(value || "")
-        .replace(/[+\-&|!(){}\[\]^"~*?:\\/]/g, " ")
-        .replace(/\s+/g, " ")
-        .trim();
+function stripInternal(stream) {
+    const result = { ...stream };
+
+    delete result._imdb;
+    delete result._match;
+    delete result._languageRank;
+    delete result._quality;
+    delete result._downloads;
+    delete result._size;
+
+    return result;
 }
 
-// ============================================
-// CATALOGUE INTERNET ARCHIVE
-// ============================================
+// ============================================================
+// CATALOGUE
+// ============================================================
 
 builder.defineCatalogHandler(async ({ extra }) => {
     try {
-        let query = "mediatype:(movies)";
+        let query = "mediatype:movies";
 
-        if (extra && extra.search) {
-            const search = cleanSearchText(extra.search);
+        if (extra?.search) {
+            const search = safeSearchText(extra.search);
 
             if (!search) return { metas: [] };
 
-            query += ` AND title:("${search}")`;
+            query += ` AND title:(${search.split(" ").join(" AND ")})`;
         } else {
             query +=
-                " AND (collection:(feature_films) OR collection:(opensource_movies))";
+                " AND (collection:feature_films OR collection:opensource_movies)";
         }
 
-        const url =
-            `https://archive.org/advancedsearch.php?q=${encodeURIComponent(query)}` +
-            `&fl[]=identifier,title,description,year` +
-            `&sort[]=downloads+desc&rows=30&output=json`;
-
-        const response = await axios.get(url, {
-            timeout: HTTP_TIMEOUT
-        });
-
-        const docs = response.data?.response?.docs || [];
+        const docs = await advancedSearch(query, 30);
 
         const metas = docs
             .filter(doc => doc.identifier)
-            .map(doc => ({
-                id: `ia:${doc.identifier}`,
-                type: "movie",
-
-                name: Array.isArray(doc.title)
+            .map(doc => {
+                const title = Array.isArray(doc.title)
                     ? doc.title[0]
-                    : (doc.title || doc.identifier),
+                    : (doc.title || doc.identifier);
 
-                description: Array.isArray(doc.description)
+                const description = Array.isArray(doc.description)
                     ? doc.description[0]
-                    : (doc.description || "Film disponible sur Internet Archive."),
+                    : (doc.description || "Film disponible sur Internet Archive.");
 
-                releaseInfo: doc.year
-                    ? String(doc.year).slice(0, 4)
-                    : undefined,
-
-                poster:
-                    `https://archive.org/services/img/${encodeURIComponent(doc.identifier)}`
-            }));
+                return {
+                    id: `ia:${doc.identifier}`,
+                    type: "movie",
+                    name: title,
+                    description,
+                    releaseInfo: doc.year
+                        ? String(doc.year).slice(0, 4)
+                        : undefined,
+                    poster:
+                        `https://archive.org/services/img/${encodeURIComponent(doc.identifier)}`
+                };
+            });
 
         return { metas };
 
     } catch (error) {
         console.error("Erreur catalogue IA:", error.message);
-
         return { metas: [] };
     }
 });
 
-// ============================================
-// GESTION DES STREAMS STREMIO
-// ============================================
+// ============================================================
+// STREAMS STREMIO
+// ============================================================
 
 builder.defineStreamHandler(async ({ type, id }) => {
     if (type !== "movie" || !id) {
         return { streams: [] };
     }
 
-    // Film sélectionné directement depuis le catalogue IA
+    // Film lancé depuis le catalogue Internet Archive.
     if (id.startsWith("ia:")) {
         const identifier = id.slice(3);
 
         const streams = await getStreamsFromIA(identifier);
 
         return {
-            streams: streams.map(stripInternalFields),
-            cacheMaxAge: 3600
+            streams: streams.map(stripInternal),
+            cacheMaxAge: 1800
         };
     }
 
-    // Recherche IMDb
+    // Recherche par IMDb.
     if (!/^tt\d+$/.test(id)) {
         return { streams: [] };
     }
 
     try {
-        const cinemetaResponse = await axios.get(
-            `https://v3-cinemeta.strem.io/meta/movie/${id}.json`,
-            { timeout: HTTP_TIMEOUT }
+        const cinemeta = await http.get(
+            `https://v3-cinemeta.strem.io/meta/movie/${id}.json`
         );
 
-        const movie = cinemetaResponse.data?.meta;
+        const movie = cinemeta.data?.meta;
 
         if (!movie?.name) return { streams: [] };
 
@@ -553,96 +807,82 @@ builder.defineStreamHandler(async ({ type, id }) => {
             ? String(movie.year).slice(0, 4)
             : null;
 
-        const searchTitle = cleanSearchText(title);
+        const docs = await searchArchiveItems(title, year, id);
 
-        if (!searchTitle) return { streams: [] };
+        console.log(
+            `[IA search] ${id} — ${title} (${year || "year unknown"}) — ${docs.length} archives candidates`
+        );
 
-        const query =
-            `mediatype:(movies) AND (identifier:${id} OR title:("${searchTitle}"))`;
-
-        const searchUrl =
-            `https://archive.org/advancedsearch.php?q=${encodeURIComponent(query)}` +
-            `&fl[]=identifier,title,year` +
-            `&sort[]=downloads+desc&rows=${MAX_ARCHIVES}&output=json`;
-
-        const searchResponse = await axios.get(searchUrl, {
-            timeout: HTTP_TIMEOUT
-        });
-
-        const docs = searchResponse.data?.response?.docs || [];
-
-        const results = await mapLimit(
-            docs.filter(doc => doc.identifier),
+        const groups = await mapLimit(
+            docs,
             4,
             doc => getStreamsFromIA(
                 doc.identifier,
                 title,
                 year,
-                id
+                id,
+                doc
             )
         );
 
-        const allStreams = results
-            .flat()
-            .sort((a, b) => {
-                if (a._imdbMatch !== b._imdbMatch) {
-                    return a._imdbMatch ? -1 : 1;
-                }
+        const all = groups.flat().sort((a, b) => {
+            // Correspondance IMDb, langue, qualité, popularité, taille.
+            if (a._imdb !== b._imdb) {
+                return a._imdb ? -1 : 1;
+            }
 
-                if (a._titleMatch !== b._titleMatch) {
-                    return a._titleMatch ? -1 : 1;
-                }
+            if (a._languageRank !== b._languageRank) {
+                return a._languageRank - b._languageRank;
+            }
 
-                if (a._qualityScore !== b._qualityScore) {
-                    return b._qualityScore - a._qualityScore;
-                }
+            if (a._match !== b._match) {
+                return b._match - a._match;
+            }
 
-                return b._size - a._size;
-            });
+            if (a._quality !== b._quality) {
+                return b._quality - a._quality;
+            }
+
+            if (a._downloads !== b._downloads) {
+                return b._downloads - a._downloads;
+            }
+
+            return b._size - a._size;
+        });
 
         const unique = [];
         const seen = new Set();
 
-        for (const stream of allStreams) {
-            if (!seen.has(stream.url)) {
-                seen.add(stream.url);
-                unique.push(stripInternalFields(stream));
-            }
+        for (const stream of all) {
+            if (seen.has(stream.url)) continue;
+
+            seen.add(stream.url);
+            unique.push(stripInternal(stream));
+
+            if (unique.length >= MAX_STREAMS) break;
         }
 
+        console.log(
+            `[IA streams] ${id} — ${unique.length} verified streams returned`
+        );
+
         return {
-            streams: unique.slice(0, 20),
+            streams: unique,
             cacheMaxAge: 1800
         };
 
     } catch (error) {
         console.error(
-            `Erreur IMDb ${id} -> Internet Archive:`,
-            error.message
+            `[IMDb -> IA] ${id}: ${error.message}`
         );
 
         return { streams: [] };
     }
 });
 
-// ============================================
-// SUPPRESSION DES CHAMPS INTERNES
-// ============================================
-
-function stripInternalFields(stream) {
-    const clean = { ...stream };
-
-    delete clean._imdbMatch;
-    delete clean._titleMatch;
-    delete clean._qualityScore;
-    delete clean._size;
-
-    return clean;
-}
-
-// ============================================
-// SERVEUR EXPRESS
-// ============================================
+// ============================================================
+// EXPRESS — HUGGING FACE / VERCEL
+// ============================================================
 
 const app = express();
 
