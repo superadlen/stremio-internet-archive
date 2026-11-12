@@ -5,7 +5,7 @@ const path = require("path");
 
 const builder = new addonBuilder({
     id: "org.internetarchive.movies",
-    version: "1.7.0", // Passage à la version 1.7.0
+    version: "1.8.0", // Passage à la version 1.8.0
     name: "Internet Archive Movies",
     description: "Recherche et diffuse des films depuis Internet Archive (Community Video & Feature Films).",
     resources: ["catalog", "stream"],
@@ -21,7 +21,7 @@ const builder = new addonBuilder({
     idPrefixes: ["ia:", "tt"]
 });
 
-// Nettoie une chaîne pour faciliter la comparaison (enlève ponctuation, accents, etc.)
+// Nettoie une chaîne pour faciliter la comparaison
 function normalizeText(str) {
     if (!str) return "";
     return str
@@ -32,31 +32,26 @@ function normalizeText(str) {
         .trim();
 }
 
-// Vérifie si le texte candidat correspond bien au film recherché (Titre + Année)
+// Vérifie la correspondance du film (Titre + Année)
 function isMatch(candidateText, targetTitle, targetYear) {
     const normCandidate = normalizeText(candidateText);
     const normTitle = normalizeText(targetTitle);
 
-    // Extraire les mots significatifs du titre
     const titleWords = normTitle.split(" ").filter(w => w.length > 1);
     if (titleWords.length === 0) return false;
 
-    // Tous les mots importants du titre doivent être présents
     const hasAllWords = titleWords.every(word => normCandidate.includes(word));
     if (!hasAllWords) return false;
 
-    // Vérifier l'année si présente dans le candidat (évite les remakes ou suites)
     const yearMatch = normCandidate.match(/\b(19\d{2}|20\d{2})\b/);
     if (targetYear && yearMatch) {
         const foundYear = parseInt(yearMatch[1], 10);
         const expectedYear = parseInt(targetYear, 10);
-        // Tolérance de 1 an (dates de sortie festival vs salle)
         if (Math.abs(foundYear - expectedYear) > 1) {
             return false;
         }
     }
 
-    // Éviter de confondre le 1er film avec une suite (Part 2, II, III, etc.) si non demandé
     if (!normTitle.includes("part") && !normTitle.includes("ii") && !normTitle.includes("2") && !normTitle.includes("3")) {
         if (/\b(part\s*2|part\s*3|part\s*ii|part\s*iii|\bii\b|\biii\b)\b/.test(normCandidate)) {
             return false;
@@ -66,7 +61,38 @@ function isMatch(candidateText, targetTitle, targetYear) {
     return true;
 }
 
-// Récupère et filtre intelligemment les flux vidéo d'une archive
+// Détecte la langue dans le texte (titre, nom de fichier ou métadonnées)
+function detectLanguage(text) {
+    const lower = text.toLowerCase();
+    if (lower.includes("french") || lower.includes("vf") || lower.includes("vostfr") || lower.includes("french.")) return "Français";
+    if (lower.includes("english") || lower.includes("eng") || lower.includes("en.")) return "English";
+    if (lower.includes("spanish") || lower.includes("esp")) return "Español";
+    if (lower.includes("german") || lower.includes("deutsch")) return "Deutsch";
+    if (lower.includes("italian") || lower.includes("italiano")) return "Italiano";
+    return "English / Multilingual"; // Par défaut sur IA
+}
+
+// Attribue un score de qualité pour trier les flux (Web-DL / 1080p en premier)
+function getQualityScore(filename, archiveTitle) {
+    const text = (filename + " " + archiveTitle).toLowerCase();
+    let score = 0;
+
+    // Source (Web-DL et BluRay en tête)
+    if (text.includes("web-dl") || text.includes("webdl") || text.includes("web rip") || text.includes("webrip")) score += 50;
+    else if (text.includes("bluray") || text.includes("blu-ray") || text.includes("bdrip")) score += 45;
+    else if (text.includes("dvdrip") || text.includes("dvd")) score += 30;
+    else if (text.includes("hdtv")) score += 25;
+
+    // Résolution
+    if (text.includes("2160p") || text.includes("4k")) score += 40;
+    else if (text.includes("1080p")) score += 30;
+    else if (text.includes("720p")) score += 20;
+    else if (text.includes("480p") || text.includes("sd")) score += 10;
+
+    return score;
+}
+
+// Récupère et filtre intelligemment les flux vidéo
 async function getStreamsFromIA(identifier, targetTitle = null, targetYear = null, imdbId = null) {
     try {
         const metadataUrl = `https://archive.org/metadata/${identifier}`;
@@ -77,7 +103,6 @@ async function getStreamsFromIA(identifier, targetTitle = null, targetYear = nul
         const archiveTitle = Array.isArray(meta.title) ? meta.title[0] : (meta.title || identifier);
         const archiveDesc = JSON.stringify(meta).toLowerCase();
         
-        // Vérifie si l'archive mentionne explicitement l'ID IMDb (ex: tt0068646)
         const hasImdbMatch = imdbId ? archiveDesc.includes(imdbId.toLowerCase()) : false;
         const archiveMatchesTitle = targetTitle ? isMatch(archiveTitle + " " + identifier, targetTitle, targetYear) : true;
 
@@ -85,24 +110,19 @@ async function getStreamsFromIA(identifier, targetTitle = null, targetYear = nul
             if (!f.name) return false;
             const lowerName = f.name.toLowerCase();
 
-            // Ignorer les fichiers dérivés en double générés par IA (.ia.mp4)
             if (lowerName.endsWith(".ia.mp4")) return false;
 
             const isVideoExt = lowerName.endsWith(".mp4") || lowerName.endsWith(".mkv") || lowerName.endsWith(".avi") || lowerName.endsWith(".ogv");
             if (!isVideoExt) return false;
 
-            // Exclure bandes-annonces, reviews, commentaires, etc.
             const isJunk = /(trailer|sample|teaser|clip|advertisement|commentary|review|behind the scenes|deleted scenes|bloopers|making of)/i.test(lowerName);
             if (isJunk) return false;
 
-            // Taille minimale : 150 Mo pour garantir un vrai long-métrage
             const fileSize = parseInt(f.size || "0", 10);
             if (fileSize < 150 * 1024 * 1024) return false;
 
-            // Si on cherche un film précis (via IMDb), vérifier la correspondance
             if (targetTitle) {
                 const fileMatchesTitle = isMatch(f.name, targetTitle, targetYear);
-                // Le fichier lui-même correspond, OU l'archive entière correspond (et le fichier n'est pas le film d'un autre)
                 if (!fileMatchesTitle && !(archiveMatchesTitle && !hasImdbMatch ? false : archiveMatchesTitle)) {
                     return false;
                 }
@@ -111,36 +131,45 @@ async function getStreamsFromIA(identifier, targetTitle = null, targetYear = nul
             return true;
         });
 
-        // Trier par taille décroissante (1080p MKV avant 480p MP4)
-        videoFiles.sort((a, b) => parseInt(b.size || "0", 10) - parseInt(a.size || "0", 10));
-
         return videoFiles.map(file => {
             const sizeBytes = parseInt(file.size || "0", 10);
             const sizeGB = (sizeBytes / (1024 * 1024 * 1024)).toFixed(1);
             const sizeDisplay = sizeGB >= 1 ? `${sizeGB} GB` : `${Math.round(sizeBytes / (1024 * 1024))} MB`;
             const ext = file.name.split('.').pop().toUpperCase();
 
-            // Détection qualité et codec
-            const infoStr = (file.name + " " + archiveTitle).toLowerCase();
-            let quality = "SD / HD";
+            const infoStr = (file.name + " " + archiveTitle + " " + (meta.language || "")).toLowerCase();
+            
+            // Qualité lisible
+            let quality = "HD";
             if (infoStr.includes("2160p") || infoStr.includes("4k")) quality = "4K";
             else if (infoStr.includes("1080p")) quality = "1080p";
             else if (infoStr.includes("720p")) quality = "720p";
-            else if (infoStr.includes("480p") || infoStr.includes("dvd")) quality = "480p";
+            else if (infoStr.includes("480p")) quality = "480p";
+
+            // Source (Web-DL, BluRay, etc.)
+            let source = "";
+            if (infoStr.includes("web-dl") || infoStr.includes("webdl")) source = " · WEB-DL";
+            else if (infoStr.includes("bluray") || infoStr.includes("blu-ray")) source = " · BluRay";
+            else if (infoStr.includes("dvdrip")) source = " · DVDRip";
+
+            // Langue détectée
+            const language = detectLanguage(infoStr);
 
             let codec = "";
-            if (infoStr.includes("hevc") || infoStr.includes("x265") || infoStr.includes("h265")) codec = " · HEVC";
-            else if (infoStr.includes("x264") || infoStr.includes("h264") || infoStr.includes("h.264")) codec = " · H.264";
+            if (infoStr.includes("hevc") || infoStr.includes("x265")) codec = " · HEVC";
+            else if (infoStr.includes("x264") || infoStr.includes("h264")) codec = " · H.264";
 
             const cleanFileName = file.name.split('/').pop();
             const displayTitle = cleanFileName.length > 12 ? cleanFileName : archiveTitle;
             const matchBadge = hasImdbMatch ? "◎ 100% match · IMDb ✓" : "◎ Title match";
+            const qualityScore = getQualityScore(file.name, archiveTitle);
 
             return {
                 name: "🏛 Archive\n〈Full Movie〉",
-                title: `✎ ${displayTitle}\n◈ ${sizeDisplay} · ${ext}\n◆ ${quality}${codec}\n${matchBadge}`,
+                title: `✎ ${displayTitle}\n◈ ${sizeDisplay} · ${ext}\n◆ ${quality}${source}${codec}\n🌍 ${language} · ${matchBadge}`,
                 url: `https://archive.org/download/${identifier}/${file.name.split('/').map(encodeURIComponent).join('/')}`,
                 _hasImdb: hasImdbMatch,
+                _qualityScore: qualityScore,
                 _size: sizeBytes
             };
         });
@@ -149,10 +178,9 @@ async function getStreamsFromIA(identifier, targetTitle = null, targetYear = nul
     }
 }
 
-// Gestion du catalogue et de la recherche manuelle
+// Gestion du catalogue
 builder.defineCatalogHandler(async ({ type, id, extra }) => {
     try {
-        // Recherche dans mediatype:movies (inclut Community Video / opensource_movies et feature_films)
         let searchQuery = "mediatype:(movies)";
 
         if (extra && extra.search) {
@@ -206,31 +234,33 @@ builder.defineStreamHandler(async ({ type, id }) => {
             const year = movieMeta.year ? String(movieMeta.year).substring(0, 4) : null;
             const cleanTitle = title.replace(/[^\w\s]/g, " ").trim();
 
-            // Recherche combinée : par ID IMDb exact OU par titre dans mediatype:movies (Community Video inclus)
             const searchQuery = `mediatype:(movies) AND (${id} OR title:("${cleanTitle}"))`;
             const searchUrl = `https://archive.org/advancedsearch.php?q=${encodeURIComponent(searchQuery)}&fl[]=identifier,title,year&sort[]=downloads+desc&rows=12&output=json`;
             
             const searchRes = await axios.get(searchUrl);
             const docs = searchRes.data.response.docs || [];
 
-            // Exécuter les requêtes de métadonnées en parallèle pour être ultra-rapide sur Vercel
             const streamPromises = docs.map(doc => getStreamsFromIA(doc.identifier, title, year, id));
             const results = await Promise.all(streamPromises);
             let allStreams = results.flat();
 
-            // Trier : d'abord les matchs IMDb certifiés, puis par taille de fichier
+            // Tri intelligent : 
+            // 1. D'abord les correspondances IMDb certifiées
+            // 2. Ensuite par Score de Qualité (WEB-DL / 1080p en priorité absolue)
+            // 3. Enfin par taille de fichier
             allStreams.sort((a, b) => {
                 if (a._hasImdb !== b._hasImdb) return b._hasImdb ? 1 : -1;
+                if (a._qualityScore !== b._qualityScore) return b._qualityScore - a._qualityScore;
                 return b._size - a._size;
             });
 
-            // Nettoyer les propriétés internes et supprimer les doublons d'URL
             const uniqueStreams = [];
             const seenUrls = new Set();
             for (const s of allStreams) {
                 if (!seenUrls.has(s.url)) {
                     seenUrls.add(s.url);
                     delete s._hasImdb;
+                    delete s._qualityScore;
                     delete s._size;
                     uniqueStreams.push(s);
                 }
