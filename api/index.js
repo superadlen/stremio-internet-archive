@@ -1,9 +1,9 @@
 // api/index.js
-// Addon Stremio pour Internet Archive — déployable sur Vercel
+// Addon Stremio pour Internet Archive — version corrigée et testée
 
 const manifest = {
   id: 'org.community.archive.streams',
-  version: '1.1.0',
+  version: '1.2.0',
   name: 'Archive.org Streams',
   description: 'Stream public domain & archived movies from Internet Archive',
   logo: 'https://archive.org/services/img/InternetArchive',
@@ -54,21 +54,43 @@ const QUALITY_RANK = { '1080p': 4, '720p': 3, '480p': 2, '360p': 1, unknown: 0 }
 
 // ---------- Recherche Archive.org ----------
 
-async function searchArchive(query, skip = 0) {
-  // On cherche dans les films ; on élargit la requête pour matcher titre + description
-  const q = `(title:(${query}) OR description:(${query})) AND mediatype:movies`;
+async function fetchSearch(q, page = 1) {
   const url =
     `https://archive.org/advancedsearch.php?` +
     `q=${encodeURIComponent(q)}` +
-    `&fl[]=identifier&fl[]=title&fl[]=year&fl[]=description&fl[]=downloads` +
+    `&fl[]=identifier&fl[]=title&fl[]=year&fl[]=description&fl[]=downloads&fl[]=mediatype` +
     `&sort[]=downloads+desc` +
-    `&rows=30&page=${Math.floor(skip / 30) + 1}` +
+    `&rows=30&page=${page}` +
     `&output=json`;
 
-  const res = await fetch(url, { headers: { 'User-Agent': 'stremio-archive-addon/1.1' } });
-  if (!res.ok) throw new Error(`Archive search failed: ${res.status}`);
+  const res = await fetch(url, {
+    headers: { 'User-Agent': 'stremio-archive-addon/1.2' }
+  });
+  if (!res.ok) throw new Error(`Archive search HTTP ${res.status}`);
   const data = await res.json();
-  const docs = data?.response?.docs || [];
+  return data?.response?.docs || [];
+}
+
+async function searchArchive(query, skip = 0) {
+  const page = Math.floor(skip / 30) + 1;
+  const cleanQuery = query.trim();
+
+  // Stratégie 1 : recherche simple + filtre movies
+  let docs = await fetchSearch(`${cleanQuery} AND mediatype:movies`, page);
+
+  // Stratégie 2 : si rien, on enlève le filtre movies (l'item peut être mal classé)
+  if (docs.length === 0) {
+    docs = await fetchSearch(cleanQuery, page);
+  }
+
+  // Stratégie 3 : si toujours rien, on tente sur chaque mot séparément (OR)
+  if (docs.length === 0) {
+    const words = cleanQuery.split(/\s+/).filter(w => w.length > 2);
+    if (words.length > 1) {
+      const orQuery = words.map(w => `title:${w}`).join(' OR ');
+      docs = await fetchSearch(`(${orQuery}) AND mediatype:movies`, page);
+    }
+  }
 
   return docs.map((doc) => ({
     id: `archive:${doc.identifier}`,
@@ -86,22 +108,42 @@ async function searchArchive(query, skip = 0) {
 async function getStreams(identifier) {
   const cleanId = identifier.replace(/^archive:/, '');
   const metaUrl = `https://archive.org/metadata/${cleanId}`;
-  const res = await fetch(metaUrl, { headers: { 'User-Agent': 'stremio-archive-addon/1.1' } });
+
+  const res = await fetch(metaUrl, {
+    headers: { 'User-Agent': 'stremio-archive-addon/1.2' }
+  });
   if (!res.ok) return [];
   const data = await res.json();
   const files = data?.files || [];
 
-  // On garde uniquement les vidéos MP4 exploitables en streaming direct
+  // Filtrage des fichiers vidéo exploitables
   const videos = files.filter((f) => {
     const name = (f.name || '').toLowerCase();
     const fmt = (f.format || '').toLowerCase();
-    if (!name.endsWith('.mp4')) return false;
-    if (/\.(ia|thumbs|spectrogram|png|jpg|gif)$/i.test(name)) return false;
+    // On ne garde que les fichiers vidéo MP4 (ou formats reconnus)
+    const isMp4 = name.endsWith('.mp4');
+    const isMkv = name.endsWith('.mkv');
+    const isOgg = name.endsWith('.ogv');
+    if (!isMp4 && !isMkv && !isOgg) return false;
+    // On rejette les miniatures / images / spectrogrammes
+    if (/\.(ia|thumbs|spectrogram|png|jpg|gif|jpeg)$/i.test(name)) return false;
     if (fmt.includes('thumb') || fmt.includes('image')) return false;
+    // On rejette les fichiers trop petits (< 20 MB = probablement pas un film)
+    if (Number(f.size || 0) < 20 * 1024 * 1024) return false;
     return true;
   });
 
-  // Tri par qualité décroissante puis taille décroissante
+  // Si aucun MP4, on tente de récupérer tous les fichiers vidéo sans filtre taille
+  if (videos.length === 0) {
+    files.forEach((f) => {
+      const name = (f.name || '').toLowerCase();
+      if (name.endsWith('.mp4') || name.endsWith('.mkv') || name.endsWith('.ogv')) {
+        videos.push(f);
+      }
+    });
+  }
+
+  // Tri : qualité décroissante, puis taille décroissante
   videos.sort((a, b) => {
     const qa = QUALITY_RANK[extractQuality(a.name, a.format)];
     const qb = QUALITY_RANK[extractQuality(b.name, b.format)];
@@ -109,7 +151,7 @@ async function getStreams(identifier) {
     return Number(b.size || 0) - Number(a.size || 0);
   });
 
-  const streams = videos.map((file) => {
+  return videos.map((file) => {
     const quality = extractQuality(file.name, file.format);
     const size = humanSize(file.size);
     const url = `https://archive.org/download/${cleanId}/${encodeURIComponent(file.name)}`;
@@ -124,8 +166,6 @@ async function getStreams(identifier) {
       }
     };
   });
-
-  return streams;
 }
 
 // ---------- Handlers ----------
@@ -140,27 +180,28 @@ async function handleCatalog(type, id, extra, res) {
 
   try {
     const metas = await searchArchive(search, skip);
+    console.log(`Search "${search}" -> ${metas.length} results`);
     return res.status(200).json({ metas });
   } catch (err) {
     console.error('Catalog error:', err);
-    return res.status(500).json({ metas: [], err: String(err) });
+    return res.status(200).json({ metas: [], err: String(err) });
   }
 }
 
 async function handleStream(type, id, res) {
   try {
     const streams = await getStreams(id);
+    console.log(`Streams for "${id}" -> ${streams.length}`);
     return res.status(200).json({ streams });
   } catch (err) {
     console.error('Stream error:', err);
-    return res.status(500).json({ streams: [], err: String(err) });
+    return res.status(200).json({ streams: [], err: String(err) });
   }
 }
 
 // ---------- Routeur principal ----------
 
 export default async function handler(req, res) {
-  // CORS (utile si tu ouvres l'addon dans un navigateur)
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -181,12 +222,11 @@ export default async function handler(req, res) {
 
   // Catalog : /catalog/{type}/{id}/{extra}.json
   if (path.includes('/catalog/')) {
-    const parts = path.split('/').filter(Boolean); // [catalog, movie, archive_search, extra.json]
+    const parts = path.split('/').filter(Boolean);
     const type = parts[1];
     const id = parts[2];
     const extraPart = parts[3] || '';
 
-    // Extra peut être "search=Twilight.json" ou "search=Twilight&skip=30.json"
     const extraStr = extraPart.replace(/\.json$/, '');
     const extra = {};
     new URLSearchParams(extraStr).forEach((v, k) => (extra[k] = v));
@@ -196,7 +236,7 @@ export default async function handler(req, res) {
 
   // Stream : /stream/{type}/{id}.json
   if (path.includes('/stream/')) {
-    const parts = path.split('/').filter(Boolean); // [stream, movie, archive:xxx.json]
+    const parts = path.split('/').filter(Boolean);
     const id = decodeURIComponent((parts[2] || '').replace(/\.json$/, ''));
     return handleStream(parts[1], id, res);
   }
