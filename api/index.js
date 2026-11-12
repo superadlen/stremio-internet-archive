@@ -5,7 +5,7 @@ const path = require("path");
 
 const builder = new addonBuilder({
     id: "org.internetarchive.movies",
-    version: "1.2.0", // Passage à la version 1.2.0
+    version: "1.3.0", // Passage à la version 1.3.0
     name: "Internet Archive Movies",
     description: "Recherche et diffuse des films du domaine public et archives depuis Internet Archive.",
     resources: ["catalog", "stream"],
@@ -21,24 +21,38 @@ const builder = new addonBuilder({
     idPrefixes: ["ia:", "tt"]
 });
 
-// Fonction utilitaire pour récupérer les fichiers vidéo d'un identifiant IA
+// Fonction utilitaire pour nettoyer et filtrer les flux vidéo (Évite les bandes-annonces et mini-clips)
 async function getStreamsFromIA(identifier) {
     try {
         const metadataUrl = `https://archive.org/metadata/${identifier}`;
         const response = await axios.get(metadataUrl);
         const files = response.data.files || [];
 
-        const videoFiles = files.filter(f => 
-            f.name && (
-                f.name.toLowerCase().endsWith(".mp4") || 
-                f.name.toLowerCase().endsWith(".mkv") || 
-                f.name.toLowerCase().endsWith(".ogv")
-            )
-        );
+        // Filtrer les fichiers vidéo valides et écarter les trailers/clips/samples
+        const videoFiles = files.filter(f => {
+            if (!f.name) return false;
+            const lowerName = f.name.toLowerCase();
+            
+            // Extensions acceptées
+            const isVideoExt = lowerName.endsWith(".mp4") || lowerName.endsWith(".mkv") || lowerName.endsWith(".ogv");
+            
+            // Exclure les mots clés indésirables (bandes-annonces, extraits, etc.)
+            const isJunk = lowerName.includes("trailer") || 
+                          lowerName.includes("sample") || 
+                          lowerName.includes("teaser") || 
+                          lowerName.includes("clip") ||
+                          lowerName.includes("advertisement");
 
-        return videoFiles.map(file => ({
+            return isVideoExt && !isJunk;
+        });
+
+        // Trier par taille de fichier décroissante (le film complet est généralement le plus gros fichier)
+        videoFiles.sort((a, b) => (b.size || 0) - (a.size || 0));
+
+        // Ne garder que les 2 meilleures sources pour ne pas polluer l'interface
+        return videoFiles.slice(0, 2).map(file => ({
             name: "Internet Archive",
-            title: `${file.name} (${file.format || "Vidéo"})`,
+            title: `${file.name} (${Math.round((file.size || 0) / (1024 * 1024))} Mo)`,
             url: `https://archive.org/download/${identifier}/${encodeURIComponent(file.name)}`
         }));
     } catch (error) {
@@ -99,7 +113,7 @@ builder.defineStreamHandler(async ({ type, id }) => {
             }
 
             const searchQuery = `mediatype:(movies) AND title:("${movieMeta.name}")`;
-            const searchUrl = `https://archive.org/advancedsearch.php?q=${encodeURIComponent(searchQuery)}&fl[]=identifier&sort[]=downloads+desc&rows=3&output=json`;
+            const searchUrl = `https://archive.org/advancedsearch.php?q=${encodeURIComponent(searchQuery)}&fl[]=identifier&sort[]=downloads+desc&rows=2&output=json`;
             const searchRes = await axios.get(searchUrl);
             const docs = searchRes.data.response.docs || [];
 
@@ -121,11 +135,8 @@ builder.defineStreamHandler(async ({ type, id }) => {
 
 // Configuration Express
 const app = express();
-
-// Servir la page HTML statique située dans le dossier "public" pour la page d'accueil
 app.use(express.static(path.join(__dirname, "../public")));
 
-// Routeur de l'add-on Stremio
 const addonInterface = builder.getInterface();
 app.use(getRouter(addonInterface));
 
