@@ -5,7 +5,7 @@ const path = require("path");
 
 const builder = new addonBuilder({
     id: "org.internetarchive.movies",
-    version: "1.4.0", // Passage à la version 1.4.0
+    version: "1.5.0", // Passage à la version 1.5.0
     name: "Internet Archive Movies",
     description: "Recherche et diffuse des films du domaine public et archives depuis Internet Archive.",
     resources: ["catalog", "stream"],
@@ -21,22 +21,23 @@ const builder = new addonBuilder({
     idPrefixes: ["ia:", "tt"]
 });
 
-// Fonction utilitaire pour nettoyer, filtrer et formater les flux vidéo comme l'exemple
-async function getStreamsFromIA(identifier) {
+// Fonction utilitaire pour nettoyer, filtrer et formater les flux vidéo
+async function getStreamsFromIA(identifier, itemTitle = "") {
     try {
         const metadataUrl = `https://archive.org/metadata/${identifier}`;
         const response = await axios.get(metadataUrl);
         const files = response.data.files || [];
+
+        // Récupérer le titre de l'archive si non fourni
+        const archiveTitle = itemTitle || response.data.metadata?.title || identifier;
 
         // Filtrer les fichiers vidéo valides
         const videoFiles = files.filter(f => {
             if (!f.name) return false;
             const lowerName = f.name.toLowerCase();
             
-            // Extensions acceptées
             const isVideoExt = lowerName.endsWith(".mp4") || lowerName.endsWith(".mkv") || lowerName.endsWith(".ogv") || lowerName.endsWith(".avi");
             
-            // Exclure les mots clés indésirables (bandes-annonces, extraits, etc.)
             const isJunk = lowerName.includes("trailer") || 
                           lowerName.includes("sample") || 
                           lowerName.includes("teaser") || 
@@ -44,32 +45,36 @@ async function getStreamsFromIA(identifier) {
                           lowerName.includes("advertisement") ||
                           lowerName.includes("subtitles");
 
-            // Règle cruciale : Exclure tout fichier de moins de 50 Mo (élimine les 2 Mo et les mini-clips)
             const fileSize = f.size || 0;
             const isTooSmall = fileSize < 50 * 1024 * 1024; // 50 Mo minimum
 
             return isVideoExt && !isJunk && !isTooSmall;
         });
 
-        // Trier par taille de fichier décroissante (le film complet le plus lourd en premier)
+        // Trier par taille de fichier décroissante
         videoFiles.sort((a, b) => (b.size || 0) - (a.size || 0));
 
-        // Formater les flux pour imiter le style professionnel des meilleurs add-ons
+        // Formater les flux
         return videoFiles.map(file => {
             const sizeGB = (file.size / (1024 * 1024 * 1024)).toFixed(1);
             const sizeDisplay = sizeGB >= 1 ? `${sizeGB} GB` : `${Math.round(file.size / (1024 * 1024))} MB`;
             const ext = file.name.split('.').pop().toUpperCase();
             
-            // Détection basique de la qualité dans le nom
             let quality = "720p / 1080p";
-            const lower = file.name.toLowerCase();
+            const lower = (file.name + " " + archiveTitle).toLowerCase();
             if (lower.includes("1080p")) quality = "1080p";
             else if (lower.includes("720p")) quality = "720p";
             else if (lower.includes("480p") || lower.includes("dvd")) quality = "480p";
 
+            // Si le nom du fichier est générique (ex: movie.mp4), on utilise le titre de l'archive
+            let displayTitle = file.name;
+            if (displayTitle.length < 10 || displayTitle.toLowerCase().includes("movie") || displayTitle.toLowerCase().includes("godfather")) {
+                displayTitle = archiveTitle;
+            }
+
             return {
                 name: "🏛 Archive\n〈Full Movie〉",
-                title: `✎ ${file.name}\n◈ ${sizeDisplay} · ${ext}\n◆ ${quality}`,
+                title: `✎ ${displayTitle}\n◈ ${sizeDisplay} · ${ext}\n◆ ${quality}`,
                 url: `https://archive.org/download/${identifier}/${encodeURIComponent(file.name)}`
             };
         });
@@ -130,18 +135,23 @@ builder.defineStreamHandler(async ({ type, id }) => {
                 return { streams: [] };
             }
 
-            const searchQuery = `mediatype:(movies) AND title:("${movieMeta.name}")`;
-            const searchUrl = `https://archive.org/advancedsearch.php?q=${encodeURIComponent(searchQuery)}&fl[]=identifier&sort[]=downloads+desc&rows=2&output=json`;
+            // Élargissement de la recherche : on cherche dans le titre ET on augmente à 5 résultats (rows=5)
+            const searchQuery = `mediatype:(movies) AND (title:("${movieMeta.name}") OR description:("${movieMeta.name}"))`;
+            const searchUrl = `https://archive.org/advancedsearch.php?q=${encodeURIComponent(searchQuery)}&fl[]=identifier,title&sort[]=downloads+desc&rows=5&output=json`;
             const searchRes = await axios.get(searchUrl);
             const docs = searchRes.data.response.docs || [];
 
             let allStreams = [];
             for (const doc of docs) {
-                const streams = await getStreamsFromIA(doc.identifier);
+                const docTitle = Array.isArray(doc.title) ? doc.title[0] : doc.title;
+                const streams = await getStreamsFromIA(doc.identifier, docTitle);
                 allStreams = allStreams.concat(streams);
             }
 
-            return { streams: allStreams };
+            // Supprimer les doublons potentiels basés sur l'URL
+            const uniqueStreams = Array.from(new Map(allStreams.map(s => [s.url, s])).values());
+
+            return { streams: uniqueStreams };
         } catch (error) {
             console.error("Erreur recherche IMDb -> IA:", error.message);
             return { streams: [] };
