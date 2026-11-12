@@ -5,7 +5,7 @@ const path = require("path");
 
 const builder = new addonBuilder({
     id: "org.internetarchive.movies",
-    version: "1.9.0", // Version mise à jour avec matching strict
+    version: "2.0.0",
     name: "Internet Archive Movies",
     description: "Recherche et diffuse des films depuis Internet Archive (Community Video & Feature Films).",
     resources: ["catalog", "stream"],
@@ -21,7 +21,10 @@ const builder = new addonBuilder({
     idPrefixes: ["ia:", "tt"]
 });
 
-// Nettoie une chaîne pour faciliter la comparaison
+/* ============================================================
+   UTILITAIRES DE NORMALISATION
+   ============================================================ */
+
 function normalizeText(str) {
     if (!str) return "";
     return str
@@ -32,41 +35,58 @@ function normalizeText(str) {
         .trim();
 }
 
-// Échappe les caractères spéciaux pour RegExp
 function escapeRegExp(str) {
     return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-// Vérifie la correspondance STRICTE du film (Titre + Année)
-// - Le titre doit apparaître en tant que mots entiers (pas en sous-chaîne)
-// - Rejet des séquelles/remakes si la cible n'en est pas une
-// - Tolérance d'année ±1
+// Retire les articles "the/a/an" pour comparer les titres
+function stripArticles(normStr) {
+    return normStr
+        .split(" ")
+        .filter(w => !["the", "a", "an"].includes(w))
+        .join(" ")
+        .trim();
+}
+
+/* ============================================================
+   MATCHING STRICT (3 niveaux de comparaison)
+   ============================================================ */
+
 function isMatch(candidateText, targetTitle, targetYear) {
     const normCandidate = normalizeText(candidateText);
     const normTitle = normalizeText(targetTitle);
     if (!normTitle || !normCandidate) return false;
 
-    // 1. Vérification stricte par mots entiers OU séquence contiguë
-    const titlePattern = new RegExp(
-        `(^|\\s)${escapeRegExp(normTitle)}(\\s|$)`
-    );
-
+    // Comparaison 1 : titre complet par mots entiers
+    const titlePattern = new RegExp(`(^|\\s)${escapeRegExp(normTitle)}(\\s|$)`);
     let titleFound = titlePattern.test(normCandidate);
 
+    // Comparaison 2 : séquence contiguë des mots (ordre respecté)
     if (!titleFound) {
-        // Tolérance : séquence contiguë des mots du titre (ordre respecté)
         const titleWords = normTitle.split(" ").filter(w => w.length > 1);
-        if (titleWords.length === 0) return false;
-        const joined = " " + normCandidate + " ";
-        const seq = " " + titleWords.join(" ") + " ";
-        if (!joined.includes(seq)) return false;
+        if (titleWords.length > 0) {
+            const joined = " " + normCandidate + " ";
+            const seq = " " + titleWords.join(" ") + " ";
+            if (joined.includes(seq)) titleFound = true;
+        }
     }
 
-    // 2. Anti-séquelles/remakes : si la cible n'est PAS une suite,
-    //    rejeter les variantes explicites (Part 2, Reloaded, Returns, etc.)
-    const isSequelTarget = /\b(part\s*\d+|chapter\s*\d+|\bii\b|\biii\b|\biv\b|\d{2,})\b/.test(normTitle);
+    // Comparaison 3 : sans articles (The Twilight Saga Eclipse == Twilight Saga Eclipse)
+    if (!titleFound) {
+        const strippedTitle = stripArticles(normTitle);
+        const strippedCandidate = stripArticles(normCandidate);
+        if (strippedTitle && strippedTitle !== normTitle) {
+            const strippedPattern = new RegExp(`(^|\\s)${escapeRegExp(strippedTitle)}(\\s|$)`);
+            if (strippedPattern.test(strippedCandidate)) titleFound = true;
+        }
+    }
+
+    if (!titleFound) return false;
+
+    // Anti-séquelles (uniquement si la cible n'est pas elle-même une suite)
+    const isSequelTarget = /\b(part\s*\d+|chapter\s*\d+|\bii\b|\biii\b|\biv\b)\b/.test(normTitle);
     if (!isSequelTarget) {
-        const sequelMarkers = /\b(part\s*[2-9]|part\s*(ii|iii|iv)|chapter\s*[2-9]|\b(ii|iii|iv|v)\b|reloaded|revenge|returns|rises|forever|reborn|resurrection|awakening|legacy|origins|begins|the\s+movie\s+[2-9])\b/;
+        const sequelMarkers = /\b(part\s*[2-9]|part\s*(ii|iii|iv)|chapter\s*[2-9]|\b(ii|iii|iv|v)\b|reloaded|revenge|returns|rises|forever|reborn|resurrection|awakening|legacy|origins|begins)\b/;
         const idx = normCandidate.indexOf(normTitle);
         if (idx >= 0) {
             const after = normCandidate.substring(idx + normTitle.length).trim();
@@ -74,20 +94,21 @@ function isMatch(candidateText, targetTitle, targetYear) {
         }
     }
 
-    // 3. Vérification de l'année (tolérance ±1 an)
+    // Vérification de l'année (tolérance ±1 an)
     const yearMatch = normCandidate.match(/\b(19\d{2}|20\d{2})\b/);
     if (targetYear && yearMatch) {
         const foundYear = parseInt(yearMatch[1], 10);
         const expectedYear = parseInt(targetYear, 10);
-        if (Math.abs(foundYear - expectedYear) > 1) {
-            return false;
-        }
+        if (Math.abs(foundYear - expectedYear) > 1) return false;
     }
 
     return true;
 }
 
-// Détecte la langue dans le texte (titre, nom de fichier ou métadonnées)
+/* ============================================================
+   LANGUE / QUALITÉ / SCORES
+   ============================================================ */
+
 function detectLanguage(text) {
     const lower = text.toLowerCase();
     if (lower.includes("french") || lower.includes("vf") || lower.includes("vostfr") || lower.includes("french.")) return "Français";
@@ -98,7 +119,6 @@ function detectLanguage(text) {
     return "English / Multilingual";
 }
 
-// Attribue un score de qualité pour trier les flux (Web-DL / 1080p en premier)
 function getQualityScore(filename, archiveTitle) {
     const text = (filename + " " + archiveTitle).toLowerCase();
     let score = 0;
@@ -116,7 +136,6 @@ function getQualityScore(filename, archiveTitle) {
     return score;
 }
 
-// Calcule un score de confiance pour un flux (0 = rejeté)
 function getMatchScore(hasImdbMatch, fileMatchesTitle, archiveMatchesTitle) {
     if (hasImdbMatch) return 100;
     if (fileMatchesTitle && archiveMatchesTitle) return 90;
@@ -125,7 +144,42 @@ function getMatchScore(hasImdbMatch, fileMatchesTitle, archiveMatchesTitle) {
     return 0;
 }
 
-// Récupère et filtre intelligemment les flux vidéo
+/* ============================================================
+   CONSTRUCTION DES REQUÊTES DE RECHERCHE (multi-stratégies)
+   ============================================================ */
+
+function buildSearchQueries(id, title, year) {
+    const queries = [];
+
+    // 1. Par ID IMDb (rare mais possible dans description)
+    queries.push(`mediatype:(movies) AND (${id})`);
+
+    // 2. Titre exact entre guillemets + année
+    const cleanTitle = title.replace(/[^\w\s]/g, " ").replace(/\s+/g, " ").trim();
+    if (year) queries.push(`mediatype:(movies) AND title:("${cleanTitle}") AND year:${year}`);
+    queries.push(`mediatype:(movies) AND title:("${cleanTitle}")`);
+
+    // 3. Titre SANS article "The" (Twilight Saga Eclipse au lieu de The Twilight Saga Eclipse)
+    const strippedTitle = cleanTitle.replace(/^(the|a|an)\s+/i, "").trim();
+    if (strippedTitle !== cleanTitle) {
+        if (year) queries.push(`mediatype:(movies) AND title:("${strippedTitle}") AND year:${year}`);
+        queries.push(`mediatype:(movies) AND title:("${strippedTitle}")`);
+    }
+
+    // 4. Recherche libre sur les mots du titre (fallback large)
+    const titleWords = strippedTitle.split(" ").filter(w => w.length > 2);
+    if (titleWords.length >= 2) {
+        const wordQuery = titleWords.map(w => `title:(${w})`).join(" AND ");
+        queries.push(`mediatype:(movies) AND ${wordQuery}${year ? ` AND year:${year}` : ""}`);
+    }
+
+    return queries;
+}
+
+/* ============================================================
+   RÉCUPÉRATION DES FLUX DEPUIS UN IDENTIFIANT IA
+   ============================================================ */
+
 async function getStreamsFromIA(identifier, targetTitle = null, targetYear = null, imdbId = null) {
     try {
         const metadataUrl = `https://archive.org/metadata/${identifier}`;
@@ -156,7 +210,6 @@ async function getStreamsFromIA(identifier, targetTitle = null, targetYear = nul
             const isJunk = /(trailer|sample|teaser|clip|advertisement|commentary|review|behind the scenes|deleted scenes|bloopers|making of)/i.test(lowerName);
             if (isJunk) return false;
 
-            // Rejet des documentaires/interviews sauf si la cible en est un
             const isDoc = /\b(documentary|interview|conference|lecture|panel|q\s*&\s*a|podcast|audiobook)\b/i.test(lowerName);
             if (isDoc && targetTitle && !/\bdocumentary\b/i.test(targetTitle)) return false;
 
@@ -164,15 +217,13 @@ async function getStreamsFromIA(identifier, targetTitle = null, targetYear = nul
             if (fileSize < 150 * 1024 * 1024) return false;
 
             // --- Logique de matching strict ---
-            if (hasImdbMatch) return true; // Confiance maximale via IMDb
+            if (hasImdbMatch) return true;
 
             if (targetTitle) {
                 const fileMatches = isMatch(f.name, targetTitle, targetYear);
 
-                // Il faut au moins un match fiable
                 if (!fileMatches && !archiveMatchesTitle) return false;
 
-                // Si un seul matche, exiger que l'autre ne soit pas contradictoire (année)
                 if (fileMatches && !archiveMatchesTitle) {
                     const archiveYearMatch = (archiveTitle + " " + identifier).match(/\b(19\d{2}|20\d{2})\b/);
                     if (targetYear && archiveYearMatch) {
@@ -244,7 +295,10 @@ async function getStreamsFromIA(identifier, targetTitle = null, targetYear = nul
     }
 }
 
-// Gestion du catalogue
+/* ============================================================
+   HANDLER CATALOGUE
+   ============================================================ */
+
 builder.defineCatalogHandler(async ({ type, id, extra }) => {
     try {
         let searchQuery = "mediatype:(movies)";
@@ -275,11 +329,12 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
     }
 });
 
-// Gestion des flux vidéo (Stream)
+/* ============================================================
+   HANDLER STREAM (multi-stratégies)
+   ============================================================ */
+
 builder.defineStreamHandler(async ({ type, id }) => {
-    if (type !== "movie") {
-        return { streams: [] };
-    }
+    if (type !== "movie") return { streams: [] };
 
     if (id.startsWith("ia:")) {
         const identifier = id.replace("ia:", "");
@@ -291,54 +346,43 @@ builder.defineStreamHandler(async ({ type, id }) => {
         try {
             const cinemetaRes = await axios.get(`https://v3-cinemeta.strem.io/meta/movie/${id}.json`);
             const movieMeta = cinemetaRes.data && cinemetaRes.data.meta;
-
-            if (!movieMeta || !movieMeta.name) {
-                return { streams: [] };
-            }
+            if (!movieMeta || !movieMeta.name) return { streams: [] };
 
             const title = movieMeta.name;
             const year = movieMeta.year ? String(movieMeta.year).substring(0, 4) : null;
-            const cleanTitle = title.replace(/[^\w\s]/g, " ").replace(/\s+/g, " ").trim();
 
-            // --- Double passe : ID IMDb + titre exact avec année ---
-            const idQuery = `mediatype:(movies) AND (${id} OR identifier:(${id}))`;
-            const titleQuery = year
-                ? `mediatype:(movies) AND title:("${cleanTitle}") AND year:${year}`
-                : `mediatype:(movies) AND title:("${cleanTitle}")`;
+            const searchQueries = buildSearchQueries(id, title, year);
 
-            const searchUrls = [
-                `https://archive.org/advancedsearch.php?q=${encodeURIComponent(idQuery)}&fl[]=identifier,title,year&sort[]=downloads+desc&rows=10&output=json`,
-                `https://archive.org/advancedsearch.php?q=${encodeURIComponent(titleQuery)}&fl[]=identifier,title,year&sort[]=downloads+desc&rows=15&output=json`
-            ];
+            // Exécute toutes les requêtes en parallèle
+            const searchPromises = searchQueries.map(q => {
+                const url = `https://archive.org/advancedsearch.php?q=${encodeURIComponent(q)}&fl[]=identifier,title,year&sort[]=downloads+desc&rows=15&output=json`;
+                return axios.get(url, { timeout: 6000 })
+                    .then(res => res.data.response.docs || [])
+                    .catch(() => []);
+            });
 
+            const results = await Promise.all(searchPromises);
             const docsMap = new Map();
-            for (const url of searchUrls) {
-                try {
-                    const res = await axios.get(url, { timeout: 6000 });
-                    (res.data.response.docs || []).forEach(d => docsMap.set(d.identifier, d));
-                } catch (_) { /* ignore */ }
-            }
+            results.flat().forEach(d => docsMap.set(d.identifier, d));
             const docs = Array.from(docsMap.values());
 
-            // Filtre préalable : ne garder que les docs dont le titre matche strictement
-            // (ou dont l'ID IMDb est présent dans l'identifiant/titre)
+            console.log(`[IA] ${searchQueries.length} requêtes, ${docs.length} items pour "${title}" (${year})`);
+
+            // Filtre strict sur le titre
             const validDocs = docs.filter(doc => {
                 const docTitle = Array.isArray(doc.title) ? doc.title[0] : (doc.title || "");
-                if (doc.identifier.toLowerCase().includes(id.toLowerCase())) return true;
                 return isMatch(docTitle + " " + doc.identifier, title, year);
             });
 
-            const streamPromises = validDocs.map(doc => getStreamsFromIA(doc.identifier, title, year, id));
-            const results = await Promise.all(streamPromises);
-            let allStreams = results.flat();
+            console.log(`[IA] ${validDocs.length} items valides après filtre strict`);
 
-            // Rejeter les flux sans match (score 0)
-            allStreams = allStreams.filter(s => s._matchScore > 0);
+            // Limite pour rester dans le timeout Vercel
+            const limitedDocs = validDocs.slice(0, 8);
 
-            // Tri : 
-            // 1. Score de match (IMDb > exact > titre)
-            // 2. Score de qualité (WEB-DL / 1080p)
-            // 3. Taille de fichier
+            const streamPromises = limitedDocs.map(doc => getStreamsFromIA(doc.identifier, title, year, id));
+            const results2 = await Promise.all(streamPromises);
+            let allStreams = results2.flat().filter(s => s._matchScore > 0);
+
             allStreams.sort((a, b) => {
                 if (a._matchScore !== b._matchScore) return b._matchScore - a._matchScore;
                 if (a._qualityScore !== b._qualityScore) return b._qualityScore - a._qualityScore;
@@ -358,6 +402,7 @@ builder.defineStreamHandler(async ({ type, id }) => {
                 }
             }
 
+            console.log(`[IA] ${uniqueStreams.length} flux finaux pour "${title}"`);
             return { streams: uniqueStreams };
         } catch (error) {
             console.error("Erreur recherche IMDb -> IA:", error.message);
@@ -368,7 +413,10 @@ builder.defineStreamHandler(async ({ type, id }) => {
     return { streams: [] };
 });
 
-// Configuration Express
+/* ============================================================
+   CONFIGURATION EXPRESS
+   ============================================================ */
+
 const app = express();
 app.use(express.static(path.join(__dirname, "../public")));
 
