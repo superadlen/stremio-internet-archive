@@ -3,44 +3,35 @@ const fs = require("fs");
 const path = require("path");
 const { addonBuilder } = require("stremio-addon-sdk");
 
-const DEBUG = !!process.env.DEBUG; // DEBUG=1 npm start  -> prints file names of items that didn't match
-const SHOW_NOT_WEB_READY = true; // true = never flag files as notWebReady, so mkv/avi/etc. are treated like any other result
-const MIN_MINUTES = 60; // movies, when runtime unknown
-const MIN_EPISODE_MINUTES = 8; // episodes, when runtime unknown
-const MAX_RESULTS = Infinity; // show every matching file found
-const MIN_PERCENT = 50; // hide weak matches (wrong item, wrong year, wrong length). Set 0 to show everything
+const DEBUG = !!process.env.DEBUG;
+const SHOW_NOT_WEB_READY = true;
+const MIN_MINUTES = 60;
+const MIN_EPISODE_MINUTES = 8;
+const MAX_RESULTS = Infinity;
+const MIN_PERCENT = 50;
 const MOVIE_CANDIDATES = 15;
 const SERIES_CANDIDATES = 30;
 const CONCURRENCY = 6;
 const RUNTIME_LOW = 0.85;
 const RUNTIME_HIGH = 1.15;
-const EP_LOW = 0.6; // episodes are looser: ad-free cuts, merged parts, etc.
+const EP_LOW = 0.6;
 const EP_HIGH = 1.7;
 const CACHE_MS = 6 * 60 * 60 * 1000;
 const CINEMETA = "https://v3-cinemeta.strem.io";
 const PORT = process.env.PORT || 7000;
 const TIMEOUT_MS = 12000;
-// Optional relay for Archive lookups (search + file lists only; video files still stream straight from archive.org)
 const ARCHIVE_API = (process.env.ARCHIVE_API || "https://archive.org").replace(/\/+$/, "");
 const ARCHIVE_KEY = process.env.ARCHIVE_KEY || "";
 
-// ---------- Result cache (optional, Upstash Redis REST) ----------
-// Set UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN to turn it on. Without them nothing changes.
-// Testing without a database: set CACHE_DIR=/some/folder and each cached title is saved there as a .json file.
-// The normal lookup always runs first. Only searches that FOUND results are stored, and a stored
-// entry is served instead of searching again until it expires.
-//   ia:search:<imdb id>[:season:episode]  the streams from the last successful search
+// ---------- Result cache ----------
 const DB_URL = (process.env.UPSTASH_REDIS_REST_URL || "").replace(/\/+$/, "");
 const DB_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || "";
 const CACHE_DIR = process.env.CACHE_DIR || "";
 const DB_ON = !!(DB_URL && DB_TOKEN) || !!CACHE_DIR;
 const cacheFile = (id) => path.join(CACHE_DIR, String(id).replace(/[^a-zA-Z0-9._-]/g, "_") + ".json");
-// Saved results are kept permanently. To make them expire, set KEEP_DAYS (e.g. KEEP_DAYS=90) in the environment.
-const KEEP_DAYS = Number(process.env.KEEP_DAYS) || 0; // 0 = forever
+const KEEP_DAYS = Number(process.env.KEEP_DAYS) || 0;
 const DB_TTL_SECONDS = KEEP_DAYS ? Math.round(KEEP_DAYS * 24 * 60 * 60) : 0;
 const DB_REUSE_MS = KEEP_DAYS ? DB_TTL_SECONDS * 1000 : Infinity;
-// A cached title is served instantly, but if it is older than this the add-on also searches again in the
-// background and updates the cache, so new uploads show up the next time the title is opened.
 const REFRESH_AFTER_MS = (Number(process.env.REFRESH_AFTER_HOURS) || 6) * 60 * 60 * 1000;
 
 async function dbPipeline(cmds) {
@@ -95,8 +86,6 @@ function fmtAgo(ms) {
   if (h < 48) return `${h}h ago`;
   return `${Math.floor(h / 24)}d ago`;
 }
-
-// copy of the streams with a "Cached" line added (the stored copies stay untouched)
 function markCached(streams, at, refreshing) {
   const line = `⚡  Cached · ${fmtAgo(Date.now() - at)}${refreshing ? " · refreshing" : ""}`;
   return streams.map((x) => ({ ...x, title: `${x.title}\n${line}` }));
@@ -112,8 +101,6 @@ function dbDelete(id) {
 
 const BAD_WORDS = /\b(trailers?|teasers?|clips?|scenes?|behind the scenes|making of|interviews?|podcast|commentary|review|reviews|reaction|soundtrack|score|gameplay|compilation|promo|tv spot)\b/i;
 
-// Only these extensions are shown (lower number = listed first within an item).
-// To allow another type, add it back, e.g. ogv: 6, avi: 7, wmv: 8, flv: 9, mpg: 5, mpeg: 5
 const EXT_RANK = { mp4: 0, m4v: 1, webm: 2, mov: 3, mkv: 4, avi: 5, wmv: 6, ogv: 7 };
 const NOT_WEB_READY = new Set(["mkv", "avi", "ogv", "wmv", "flv", "mpg", "mpeg", "mov"]);
 
@@ -121,7 +108,7 @@ const manifest = {
   id: "org.example.archivemoviesearch",
   version: "1.6.2",
   name: "Internet Archive DZ",
-  description: "Movies and TV episodes from the Internet Archive",
+  description: "Public domain and freely available movies and TV episodes from the Internet Archive",
   logo: "https://i.pinimg.com/1200x/fb/0d/cc/fb0dccec209770b71f8570c3bb8a38b7.jpg",
   resources: ["stream"],
   types: ["movie", "series"],
@@ -133,22 +120,14 @@ const manifest = {
 const norm = (s) =>
   String(s || "").toLowerCase().replace(/&/g, " and ").replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
 
-// title form used for matching: leading "The" dropped
 const normTitle = (s) => norm(s).replace(/^the /, "");
-// same, with all spaces removed: "SpiritedAway" and "Spirited Away" both become "spiritedaway"
 const squash = (s) => normTitle(s).replace(/ /g, "");
 
 const STOP = new Set(["the", "and", "of", "an", "to", "in", "is", "it", "for", "on", "with", "at", "by", "from"]);
 
-// distinctive words of a title
 const nameWords = (name) => [...new Set(normTitle(name).split(" ").filter((w) => w.length >= 2 && !STOP.has(w)))];
-// how many of those words must be present (titles under 3 words must match fully)
 const needWords = (n) => (n < 3 ? n : Math.ceil(n * 0.66));
 
-// Fuzzy "does this text contain this title?"
-//  - whole title as words, ignoring "The" and "&" vs "and"
-//  - or whole title with spaces ignored (SpiritedAway_1080p), for titles of 7+ letters
-//  - loose = true: also OK when most of the title's words are present (titles of 3+ words only)
 function titleIn(text, name, loose) {
   const want = normTitle(name);
   if (!want) return false;
@@ -163,7 +142,6 @@ function titleIn(text, name, loose) {
   return toks.filter((w) => words.has(w)).length >= needWords(toks.length);
 }
 
-// title with the movie/show name taken out (used to spot junk words like "trailer")
 function stripName(title, name) {
   let s = normTitle(title);
   const want = normTitle(name);
@@ -187,7 +165,6 @@ function parseRuntime(r) {
   return n ? +n[0] : null;
 }
 
-// Archive "length" is seconds ("5400.12") or "HH:MM:SS"
 function parseLengthMins(len) {
   if (!len) return null;
   const s = String(len);
@@ -227,7 +204,7 @@ async function fetchJson(url) {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return await res.json();
   } catch (e) {
-    const c = e.cause && (e.cause.code || e.cause.message); // "fetch failed" hides the real reason
+    const c = e.cause && (e.cause.code || e.cause.message);
     if (c) e.message += ` (${c})`;
     throw e;
   } finally {
@@ -240,7 +217,6 @@ async function getMeta(type, imdbId) {
   return meta || null;
 }
 
-// run fn over items with limited concurrency, keeping order
 async function pool(items, n, fn) {
   const out = new Array(items.length);
   let i = 0;
@@ -270,12 +246,10 @@ async function archiveQuery(q, rows) {
   return data?.response?.docs || [];
 }
 
-// Items that mention the IMDb id (description, subject or external-identifier) are flagged doc.imdb = true.
 async function searchArchive(name, series, imdbId) {
   const n = phrase(name);
   const jobs = [];
 
-  // title phrase, plus variants: "&" as "and", no leading "The", and with "&"/"and" removed
   const variants = [
     n,
     n.replace(/&/g, "and").replace(/\s+/g, " ").trim(),
@@ -284,18 +258,15 @@ async function searchArchive(name, series, imdbId) {
   ].filter((v, i, a) => v.length >= 3 && a.indexOf(v) === i);
   for (const v of variants) jobs.push({ q: `title:"${v}" AND mediatype:movies`, imdb: false });
 
-  // no-space titles: SpiritedAway_1080p
   const sq = squash(name);
   if (sq.length >= 7) jobs.push({ q: `title:${sq}* AND mediatype:movies`, imdb: false });
 
-  // titles holding most of the words
   const words = nameWords(name);
   if (words.length >= 3) {
     const top = [...words].sort((a, b) => b.length - a.length).slice(0, needWords(words.length));
     jobs.push({ q: `title:(${top.join(" AND ")}) AND mediatype:movies`, imdb: false });
   }
 
-  // matches subject / description too (movies and series)
   jobs.push({ q: `"${n}" AND mediatype:movies`, imdb: false });
 
   if (series && phrase(series.epTitle).length >= 4) {
@@ -322,7 +293,7 @@ async function searchArchive(name, series, imdbId) {
     for (const d of list) {
       const prev = seen.get(d.identifier);
       if (!prev) seen.set(d.identifier, d);
-      else if (d.imdb) prev.imdb = true; // title search found it first, IMDb search confirms it
+      else if (d.imdb) prev.imdb = true;
     }
   }
   const out = [...seen.values()];
@@ -330,7 +301,6 @@ async function searchArchive(name, series, imdbId) {
   return out;
 }
 
-// All playable video files in an item
 function videoFiles(files) {
   return files
     .map((f) => {
@@ -342,7 +312,7 @@ function videoFiles(files) {
         ext in EXT_RANK &&
         f.source !== "metadata" &&
         !/_thumb|sample|trailer/i.test(f.name.split("/").pop()) &&
-        !BAD_WORDS.test(norm(f.name.split("/").pop())) // extras, clips, "making of" etc. inside an item
+        !BAD_WORDS.test(norm(f.name.split("/").pop()))
     );
 }
 
@@ -352,47 +322,36 @@ const byQuality = (a, b) =>
   (Number(b.f.size) || 0) - (Number(a.f.size) || 0);
 
 // ----- movies -----
-const MAX_PER_ITEM = 25; // safety limit on files returned from any one Archive item (every version of a film is kept)
+const MAX_PER_ITEM = 25;
 
-// an IMDb id written into a file name, e.g. "Film (1962) {imdb-tt0056220}.mp4"
 const imdbTag = (fileName) => {
   const m = String(fileName).match(/(?<![a-z0-9])tt\d{7,9}(?!\d)/i);
   return m ? m[0].toLowerCase() : "";
 };
 
-// returns the files for this film, best first (at most MAX_PER_ITEM)
-// verify = the item was found only by a loose match (description / most of the words),
-// so it needs a known runtime to check the file length against
 function pickMovieFile(files, runtime, verify, name, imdbId, trusted) {
   if (verify && !runtime) return [];
   const lo = runtime ? runtime * RUNTIME_LOW : MIN_MINUTES;
   const hi = runtime ? runtime * RUNTIME_HIGH : Infinity;
-  // unknown length is only allowed when we don't know the expected runtime either
   let inRange = videoFiles(files).filter(({ mins }) => (mins === null ? !runtime : mins >= lo && mins <= hi));
 
-  // files tagged with an IMDb id belong to that film only
   const want = String(imdbId || "").toLowerCase();
   if (want) {
     const tag = ({ f }) => imdbTag(f.name.split("/").pop());
     inRange = inRange.filter((v) => !tag(v) || tag(v) === want);
     const exact = inRange.filter((v) => tag(v) === want);
-    if (exact.length > MAX_PER_ITEM) return []; // dozens of files tagged with this id: episodes of a series, not a film
+    if (exact.length > MAX_PER_ITEM) return [];
     if (exact.length) inRange = exact;
   }
   inRange.sort(byQuality);
-  // An item holding many films (a "collection") would return every film of a similar length.
-  // With more than 3 files in range, keep only the files named for this film (possibly none).
-  // An IMDb-confirmed item with a handful of files none of which carry the title (parts, "video.mp4") is kept whole.
   if (name && inRange.length > 3) {
-    const named = inRange.filter(({ f }) => titleIn(f.name, name, false)); // whole path, so a folder named for the film counts
-    inRange = named.length || !(trusted && inRange.length <= 8) ? named : inRange; // trusted = IMDb-confirmed or the item itself is titled for the film
+    const named = inRange.filter(({ f }) => titleIn(f.name, name, false));
+    inRange = named.length || !(trusted && inRange.length <= 8) ? named : inRange;
   }
   return inRange.slice(0, MAX_PER_ITEM);
 }
 
 // ----- episodes -----
-
-// does the text contain (most of) this episode title?
 function epTitleMatches(text, epTitle) {
   const full = norm(epTitle);
   const toks = full.split(" ").filter((w) => w.length >= 2 && !STOP.has(w));
@@ -409,7 +368,6 @@ function seasonOf(str) {
   return m ? +m[1] : null;
 }
 
-// Season/episode references found in a file path. explicit = a real S01E02 / 1x02 style tag.
 function parseRefs(path) {
   const parts = String(path || "").split("/");
   const base = parts.pop().replace(/\.[a-z0-9]{2,4}$/i, "").replace(/[._]+/g, " ");
@@ -433,17 +391,15 @@ function parseRefs(path) {
     const m5 = base.match(/^\s*(\d{1,3})(?=\s|-)/);
     if (m5) cands.push({ s: null, e: +m5[1], e2: null, explicit: false });
 
-    // 3-digit production style: 102 = season 1 episode 02
     const m6 = base.match(/(?<![a-z0-9])([1-9])(\d{2})(?![a-z0-9])/);
     if (m6) cands.push({ s: +m6[1], e: +m6[2], e2: null, explicit: false });
   }
   return { cands, dirSeason };
 }
 
-// -> { tier: 0 none | 1 loose | 2 explicit, span: how many episodes the file covers }
 function episodeMatch(itemTitle, path, season, ep, epTitle) {
   let { cands, dirSeason } = parseRefs(path);
-  if (!cands.length) cands = parseRefs(itemTitle).cands; // single-episode items: tag lives in the item title
+  if (!cands.length) cands = parseRefs(itemTitle).cands;
   const ctxSeason = dirSeason ?? seasonOf(itemTitle);
 
   let best = { tier: 0, span: 1 };
@@ -465,7 +421,6 @@ function episodeMatch(itemTitle, path, season, ep, epTitle) {
   return best;
 }
 
-// returns ALL matching files, best first
 function pickEpisodeFile(files, doc, season, ep, epTitle, runtime) {
   const lo = runtime ? runtime * EP_LOW : MIN_EPISODE_MINUTES;
   const itemTitle = doc.title || "";
@@ -503,7 +458,7 @@ function moviePercent(item, picked, name, year, runtime) {
     const d = Math.abs(picked.mins - runtime) / runtime;
     pts += d <= 0.03 ? 30 : d <= 0.06 ? 24 : d <= 0.1 ? 16 : d <= 0.15 ? 8 : 0;
   } else pts += 12;
-  if (item.imdb) pts += 30; // IMDb id found in the upload's metadata
+  if (item.imdb) pts += 30;
   return Math.min(100, Math.round(pts));
 }
 
@@ -518,7 +473,6 @@ function episodePercent(picked, runtime, titleHit) {
   return Math.min(100, Math.round(pts));
 }
 
-// returns an array of { doc, picked } (one per matching file), or null
 async function lookupItem(doc, picker, series, stats) {
   try {
     const md = await fetchJson(`${ARCHIVE_API}/metadata/${encodeURIComponent(doc.identifier)}`);
@@ -540,7 +494,7 @@ async function lookupItem(doc, picker, series, stats) {
   }
 }
 
-// ----- display helpers: language + quality -----
+// ----- display helpers -----
 const LANG_NAMES = {
   eng: "English", en: "English",
   jpn: "Japanese", ja: "Japanese", jp: "Japanese",
@@ -565,7 +519,17 @@ const LANG_NAMES = {
   cze: "Czech", ces: "Czech", hun: "Hungarian", rum: "Romanian", ron: "Romanian",
 };
 
-// language from the item's metadata, plus dub/sub tags found in the names
+// language codes -> flag emoji
+const LANG_FLAGS = {
+  English: "🇬🇧", Japanese: "🇯🇵", French: "🇫🇷", German: "🇩🇪", Spanish: "🇪🇸",
+  Italian: "🇮🇹", Russian: "🇷🇺", Portuguese: "🇵🇹", Chinese: "🇨🇳", Hindi: "🇮🇳",
+  Tamil: "🇮🇳", Telugu: "🇮🇳", Bengali: "🇧🇩", Urdu: "🇵🇰", Korean: "🇰🇷",
+  Arabic: "🇸🇦", Dutch: "🇳🇱", Swedish: "🇸🇪", Norwegian: "🇳🇴", Danish: "🇩🇰",
+  Finnish: "🇫🇮", Polish: "🇵🇱", Turkish: "🇹🇷", Greek: "🇬🇷", Hebrew: "🇮🇱",
+  Thai: "🇹🇭", Vietnamese: "🇻🇳", Indonesian: "🇮🇩", Czech: "🇨🇿", Hungarian: "🇭🇺",
+  Romanian: "🇷🇴", Ukrainian: "🇺🇦",
+};
+
 function languageLabel(doc, f) {
   const raw = [].concat(doc.language || []).flatMap((x) => String(x).split(/[,;/|]+/));
   const names = [];
@@ -584,45 +548,63 @@ function languageLabel(doc, f) {
   return all.length ? all.join(" · ") : "Language not listed";
 }
 
-// resolution from the file's real width/height when the Archive has it, else from the names
+// extract resolution + source + codec + HDR + audio info, structured
 function qualityInfo(f, doc) {
   const text = norm(`${f.name.split("/").pop()} ${doc.title || ""}`);
   const w = Number(f.width);
   const h = Number(f.height);
+
+  // resolution
   let res = "";
   let rank = 0;
-  const setRes = (label, r) => {
-    res = label;
-    rank = r;
-  };
   if (w || h) {
     const wide = w || (h * 16) / 9;
-    if (wide >= 3000) setRes("4K", 5);
-    else if (wide >= 1800) setRes("1080p", 4);
-    else if (wide >= 1200) setRes("720p", 3);
-    else if (wide >= 700) setRes("480p", 2);
-    else setRes(`${h || Math.round((w * 9) / 16)}p`, h >= 460 ? 2 : 1);
-  } else if (/\b(2160p|4k|uhd)\b/.test(text)) setRes("4K", 5);
-  else if (/\b(1080p|1080i|full hd|fhd)\b/.test(text)) setRes("1080p", 4);
-  else if (/\b720p\b/.test(text)) setRes("720p", 3);
-  else if (/\b(480p|576p)\b/.test(text)) setRes("480p", 2);
-  else if (/\b(360p|240p)\b/.test(text)) setRes("360p", 1);
+    if (wide >= 3000) { res = "4K"; rank = 5; }
+    else if (wide >= 1800) { res = "1080p"; rank = 4; }
+    else if (wide >= 1200) { res = "720p"; rank = 3; }
+    else if (wide >= 700) { res = "480p"; rank = 2; }
+    else { res = `${h || Math.round((w * 9) / 16)}p`; rank = h >= 460 ? 2 : 1; }
+  } else if (/\b(2160p|4k|uhd)\b/.test(text)) { res = "4K"; rank = 5; }
+  else if (/\b(1080p|1080i|full hd|fhd)\b/.test(text)) { res = "1080p"; rank = 4; }
+  else if (/\b720p\b/.test(text)) { res = "720p"; rank = 3; }
+  else if (/\b(480p|576p)\b/.test(text)) { res = "480p"; rank = 2; }
+  else if (/\b(360p|240p)\b/.test(text)) { res = "360p"; rank = 1; }
 
-  const bits = [];
-  if (res) bits.push(res);
-  if (/\b(blu ray|bluray|bdrip|bd rip|brrip|br rip|bdremux|remux)\b/.test(text)) bits.push("BluRay");
-  else if (/\b(web dl|webdl|webrip|web rip)\b/.test(text)) bits.push("WEB");
-  else if (/\b(hdtv|pdtv|tvrip|tv rip)\b/.test(text)) bits.push("HDTV");
-  else if (/\b(dvdrip|dvd rip|dvdscr|dvd)\b/.test(text)) bits.push("DVD");
-  else if (/\b(vhsrip|vhs)\b/.test(text)) bits.push("VHS");
-  else if (/\b(camrip|hdcam|telesync|telecine|hdts)\b/.test(text)) bits.push("CAM");
-  if (/\b(x265|h 265|hevc)\b/.test(text)) bits.push("HEVC");
-  else if (/\b(x264|h 264|avc)\b/.test(text)) bits.push("H.264");
-  else if (/\bav1\b/.test(text)) bits.push("AV1");
-  else if (/\bxvid\b/.test(text)) bits.push("XviD");
-  if (/\bhdr(10)?\b/.test(text)) bits.push("HDR");
-  if (/\b(10 ?bit|hi ?10p?)\b/.test(text)) bits.push("10-bit");
-  return { label: bits.length ? bits.join(" · ") : "Quality unknown", rank };
+  // source
+  let source = "";
+  if (/\b(blu ray|bluray|bdrip|bd rip|brrip|br rip|bdremux|remux)\b/.test(text)) source = "BluRay";
+  else if (/\b(web dl|webdl|webrip|web rip)\b/.test(text)) source = "WEB-DL";
+  else if (/\b(hdtv|pdtv|tvrip|tv rip)\b/.test(text)) source = "HDTV";
+  else if (/\b(dvdrip|dvd rip|dvdscr|dvd)\b/.test(text)) source = "DVD";
+  else if (/\b(vhsrip|vhs)\b/.test(text)) source = "VHS";
+  else if (/\b(camrip|hdcam|telesync|telecine|hdts)\b/.test(text)) source = "CAM";
+
+  // codec
+  let codec = "";
+  if (/\b(x265|h 265|hevc)\b/.test(text)) codec = "HEVC";
+  else if (/\b(x264|h 264|avc)\b/.test(text)) codec = "H.264";
+  else if (/\bav1\b/.test(text)) codec = "AV1";
+  else if (/\bxvid\b/.test(text)) codec = "XviD";
+
+  // HDR / bit depth
+  const hdr = [];
+  if (/\bdolby vision\b|\b(?:dovi|dv)\b/.test(text)) hdr.push("DV");
+  if (/\bhdr10\+\b/.test(text)) hdr.push("HDR10+");
+  else if (/\bhdr10\b/.test(text)) hdr.push("HDR10");
+  else if (/\bhdr\b/.test(text)) hdr.push("HDR");
+  if (/\b(10 ?bit|hi ?10p?)\b/.test(text)) hdr.push("10bit");
+
+  // audio
+  const audio = [];
+  if (/\batmos\b/.test(text)) audio.push("Atmos");
+  if (/\btruehd\b/.test(text)) audio.push("TrueHD");
+  if (/\b(ddp?\+?|eac3|dd\+|dolby digital)\b/.test(text)) audio.push("DD+");
+  else if (/\b(dts(-hd|-x)?)\b/.test(text)) audio.push("DTS");
+  if (/\b5 1\b|\b5\.1\b/.test(text)) audio.push("5.1");
+  else if (/\b7 1\b|\b7\.1\b/.test(text)) audio.push("7.1");
+  else if (/\b2 0\b|\b2\.0\b/.test(text)) audio.push("2.0");
+
+  return { res, rank, source, codec, hdr, audio, label: [res, source, codec].filter(Boolean).join(" · ") };
 }
 // ----- end display helpers -----
 
@@ -636,6 +618,72 @@ function cleanTitle(t, movieName) {
   return truncate(s || String(t || ""), 50);
 }
 
+// Convert quality info into a single line like "BluRay 📺 HDR | DV | 10bit 🎞️ HEVC"
+function qualityLine(q) {
+  const parts = [];
+  if (q.source) parts.push(q.source);
+  if (q.hdr.length) parts.push("📺 " + q.hdr.join(" | "));
+  if (q.codec) parts.push("🎞️ " + q.codec);
+  return parts.join(" ");
+}
+
+// Line for audio track info like "🎧 Atmos | TrueHD | DD+ 📡 5.1"
+function audioLine(q) {
+  const parts = [];
+  if (q.audio.length) parts.push("🎧 " + q.audio.join(" | "));
+  return parts.join(" ");
+}
+
+// Build the multi-line stream title matching the requested style
+function buildStreamTitle({ doc, picked, ctx, pct }) {
+  const { f, ext, mins } = picked;
+  const { year, name, series } = ctx;
+  const itemYear = doc.year ? String(doc.year).slice(0, 4) : "";
+  const fileName = f.name.split("/").pop();
+  const q = qualityInfo(f, doc);
+
+  // resolution header line
+  const resLine = q.res
+    ? `${q.res === "4K" ? "🔥 4K UHD" : `🎬 ${q.res}`}`
+    : "🎬 Unknown Quality";
+
+  // title line
+  const displayName = series ? `${name}` : cleanTitle(doc.title || doc.identifier, name);
+  const titleLine = `🎬 ${displayName}${itemYear ? ` (${itemYear})` : ""}`;
+
+  // quality line
+  const qLine = qualityLine(q);
+
+  // audio line
+  const aLine = audioLine(q);
+
+  // languages line
+  const langText = languageLabel(doc, f);
+  const langParts = langText.split(" · ").map((l) => LANG_FLAGS[l] || l);
+  const langLine = langParts.length ? `🗣️ ${langParts.join(" / ")}` : "";
+
+  // size line
+  const sizeLine = f.size ? `📦 ${fmtSize(f.size)}` : "";
+
+  // source link line
+  const linkLine = `💻 Web Link 🔍 IA`;
+
+  // Assemble lines, skipping empty
+  const lines = [resLine, titleLine];
+  if (series) {
+    const label = `S${pad2(series.season)}E${pad2(series.ep)}`;
+    lines.push(`📺 ${label}${series.epTitle ? " · " + truncate(series.epTitle, 40) : ""}`);
+  }
+  if (qLine) lines.push(qLine);
+  if (aLine) lines.push(aLine);
+  if (langLine) lines.push(langLine);
+  if (sizeLine) lines.push(sizeLine);
+  if (mins) lines.push(`⏱️ ${fmtMins(mins)}${pct ? ` · ${pct}% match` : ""}`);
+  lines.push(linkLine);
+
+  return lines.join("\n");
+}
+
 function formatStream({ doc, picked }, ctx) {
   const { f, ext, mins } = picked;
   const { year, runtime, name, series } = ctx;
@@ -644,34 +692,10 @@ function formatStream({ doc, picked }, ctx) {
 
   const path = f.name.split("/").map(encodeURIComponent).join("/");
   const url = `https://archive.org/download/${encodeURIComponent(doc.identifier)}/${path}`;
-
-  const itemYear = doc.year ? String(doc.year).slice(0, 4) : "";
-  const size = fmtSize(f.size);
-  const dl = fmtCount(Number(doc.downloads));
   const fileName = f.name.split("/").pop();
-
-  let runtimeTxt = mins ? fmtMins(mins) : "length ?";
-  if (runtime && mins) {
-    const close = Math.abs(mins / (picked.span || 1) - runtime) / runtime <= 0.15;
-    runtimeTxt += close ? " ✓" : ` (expected ${fmtMins(runtime)})`;
-  }
-
-  const lines = [];
-  lines.push(`✎  ${cleanTitle(doc.title || doc.identifier, series ? "" : name)}${itemYear ? ` (${itemYear})` : ""}`);
-  if (series) {
-    const label = `S${pad2(series.season)}E${pad2(series.ep)}`;
-    lines.push(`▤  ${label}${series.epTitle ? " · " + truncate(series.epTitle, 40) : ""}`);
-    lines.push(`▸  ${truncate(fileName.replace(/\.[a-z0-9]{2,4}$/i, ""), 45)}`);
-  }
-  lines.push(`◈  ${runtimeTxt} · ${[size, ext.toUpperCase()].filter(Boolean).join(" · ")}`);
   const q = qualityInfo(f, doc);
-  lines.push(`◆  ${q.label}`);
-  lines.push(`◐  ${languageLabel(doc, f)}`);
-  const extra = [`${pct}% match`];
-  if (doc.imdb) extra.push("IMDb ✓");
-  if (doc.verify) extra.push("runtime-checked");
-  if (dl) extra.push(`⇩ ${dl}`);
-  lines.push(`◎  ${extra.join(" · ")}`);
+
+  const title = buildStreamTitle({ doc, picked, ctx, pct });
 
   return {
     pct,
@@ -679,7 +703,7 @@ function formatStream({ doc, picked }, ctx) {
     stream: {
       url,
       name: `🏛 Archive\n〈${series ? "Episode" : "Full Movie"}〉`,
-      title: lines.join("\n"),
+      title,
       behaviorHints: {
         notWebReady: SHOW_NOT_WEB_READY ? false : NOT_WEB_READY.has(ext),
         filename: fileName,
@@ -699,12 +723,10 @@ async function findStreams(meta, series, imdbId) {
 
   const docs = await searchArchive(name, series, imdbId);
 
-  const titled = (d) => titleIn(d.title, name, false); // whole title (spaces / "The" / "&" ignored)
-  const looseTitled = (d) => titleIn(d.title, name, true); // ...or most of its words
+  const titled = (d) => titleIn(d.title, name, false);
+  const looseTitled = (d) => titleIn(d.title, name, true);
   const mentions = (d) => titleIn(`${asText(d.subject)} ${asText(d.description)}`, name, false);
 
-  // Movies found only by a loose match (description, or most of the words) must be verified:
-  // runtime known, file length within 15% of it, and the year must not contradict.
   const needsCheck = (d) => !series && !d.imdb && !titled(d);
   const yearOk = (d) => {
     if (!year) return true;
@@ -712,18 +734,15 @@ async function findStreams(meta, series, imdbId) {
     return !ys.length || ys.some((y) => Math.abs(y - Number(year)) <= 1);
   };
 
-  // IMDb-confirmed items skip the title and year checks (junk-word filter still applies)
   let candidates = docs
     .filter((d) => d.imdb || looseTitled(d) || mentions(d))
     .filter((d) => !BAD_WORDS.test(stripName(d.title, name)))
     .filter((d) => {
       if (d.imdb || series || !year) return true;
       if (needsCheck(d)) return yearOk(d);
-      // item year (if any) must be within 1 year of the film
       return !d.year || Math.abs(Number(d.year) - Number(year)) <= 1;
     })
     .map((d) => (needsCheck(d) ? { ...d, verify: true } : d));
-  // IMDb-confirmed first, then items with the name in the title, then loose matches; download order within each group
   candidates = [
     ...candidates.filter((d) => d.imdb),
     ...candidates.filter((d) => !d.imdb && titled(d)),
@@ -737,7 +756,6 @@ async function findStreams(meta, series, imdbId) {
 
   const picker = series
     ? (files, doc) => {
-      // items not clearly titled with the show must name it in the file path itself
       const ok = doc.imdb || titled(doc) ? files : files.filter((f) => titleIn(f.name, name, false));
       return pickEpisodeFile(ok, doc, series.season, series.ep, series.epTitle, runtime);
     }
@@ -750,18 +768,16 @@ async function findStreams(meta, series, imdbId) {
   const out = looked
     .map((x) => formatStream(x, ctx))
     .filter((x) => x.pct >= MIN_PERCENT)
-    .sort((a, b) => b.pct - a.pct || b.rank - a.rank) // same match %: higher resolution first
+    .sort((a, b) => b.pct - a.pct || b.rank - a.rank)
     .slice(0, MAX_RESULTS)
     .map((x) => x.stream);
   out.complete = docs.failed === 0 && stats.failed === 0;
   return out;
 }
-// --------------------------------------
 
 const cache = new Map();
 const builder = new addonBuilder(manifest);
 
-// full lookup for one title/episode; updates the memory cache and the saved cache
 async function searchAndStore(type, id, isRefresh) {
   const [baseId, s, e] = id.split(":");
   const meta = await getMeta(type, baseId);
@@ -778,8 +794,7 @@ async function searchAndStore(type, id, isRefresh) {
 
   const streams = await findStreams(meta, series, baseId);
   console.log(`  -> ${streams.length} Internet Archive result(s)${isRefresh ? " (background refresh)" : ""}`);
-  if (streams.length) cache.set(id, { t: Date.now(), at: Date.now(), streams }); // don't cache empty/failed lookups
-  // cache successful results only; empty or error-hit searches are never stored
+  if (streams.length) cache.set(id, { t: Date.now(), at: Date.now(), streams });
   if (DB_ON && streams.length && streams.complete) {
     dbSave({
       t: Date.now(), id, name: meta.name,
@@ -788,7 +803,6 @@ async function searchAndStore(type, id, isRefresh) {
       count: streams.length, streams,
     });
   } else if (DB_ON && !streams.complete) console.log("  (search had errors, not cached)");
-  // a refresh that completed cleanly and found nothing means the old cached links are gone
   if (isRefresh && streams.complete && !streams.length) {
     cache.delete(id);
     if (DB_ON) await dbDelete(id);
@@ -835,21 +849,14 @@ builder.defineStreamHandler(async ({ type, id }) => {
   }
 });
 
-// ---------- Vercel-compatible handler (and local server fallback) ----------
 const addonInterface = builder.getInterface();
 
-/**
- * Gère les requêtes HTTP de l'addon Stremio.
- * Compatible avec le format Vercel (req, res) et avec un serveur Node classique.
- */
 async function handleRequest(req, res) {
-  // Construit l'URL complète
   const proto = req.headers["x-forwarded-proto"] || "http";
   const host = req.headers["x-forwarded-host"] || req.headers.host || "localhost";
   const url = new URL(req.url, `${proto}://${host}`);
   const pathname = url.pathname;
 
-  // En-têtes CORS (nécessaires pour Stremio)
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -858,14 +865,12 @@ async function handleRequest(req, res) {
     return res.end();
   }
 
-  // Route : /manifest.json
   if (pathname === "/manifest.json" || pathname === "/") {
     res.setHeader("Content-Type", "application/json; charset=utf-8");
     res.setHeader("Cache-Control", "max-age=3600");
     return res.end(JSON.stringify(addonInterface.manifest));
   }
 
-  // Route : /stream/{type}/{id}.json
   const streamMatch = pathname.match(/^\/stream\/([^/]+)\/(.+)\.json$/);
   if (streamMatch) {
     const type = streamMatch[1];
@@ -883,7 +888,6 @@ async function handleRequest(req, res) {
     }
   }
 
-  // Route : /configure (page de configuration minimale)
   if (pathname === "/configure") {
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     return res.end(`<!DOCTYPE html>
@@ -899,16 +903,13 @@ async function handleRequest(req, res) {
 </body></html>`);
   }
 
-  // Route inconnue
   res.statusCode = 404;
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   return res.end(JSON.stringify({ err: "Not found" }));
 }
 
-// Export pour Vercel (et autres plateformes serverless)
 module.exports = handleRequest;
 
-// Si exécuté directement en local (node index.js), démarre un serveur HTTP classique
 if (require.main === module) {
   const http = require("http");
   const server = http.createServer((req, res) => {
