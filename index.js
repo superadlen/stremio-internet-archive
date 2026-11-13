@@ -644,7 +644,7 @@ function buildStreamTitle({ doc, picked, ctx, pct }) {
 
   // resolution header line
   const resLine = q.res
-    ? `${q.res === "4K" ? "🔥 4K UHD" : `🎬 ${q.res}`}`
+    ? `${q.res === "4K" ? "🔥 4K UHD" : `🔥 ${q.res}`}`
     : "🎬 Unknown Quality";
 
   // title line
@@ -666,7 +666,7 @@ function buildStreamTitle({ doc, picked, ctx, pct }) {
   const sizeLine = f.size ? `📦 ${fmtSize(f.size)}` : "";
 
   // source link line
-  const linkLine = `💻 Web Link 🔍 IA`;
+  const linkLine = `💻 Web Link 🔍 DZ`;
 
   // Assemble lines, skipping empty
   const lines = [resLine, titleLine];
