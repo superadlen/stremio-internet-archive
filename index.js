@@ -109,7 +109,7 @@ const HDR_TYPES = ["HDR10", "HDR10+", "DV", "10bit"];
 
 const manifest = {
   id: "org.example.archivemoviesearch",
-  version: "1.7.8",
+  version: "1.7.9",
   name: "Archive-DZ",
   description: "🎬 Films et séries en streaming depuis Internet Archive — Public domain & contenus libres, avec tri par langue, qualité et taille.",
   logo: "https://i.pinimg.com/1200x/fb/0d/cc/fb0dccec209770b71f8570c3bb8a38b7.jpg",
@@ -775,7 +775,6 @@ function applyUserCfg(streams, cfg) {
   // 1) QUALITÉS : ne garder que celles cochées
   if (Array.isArray(cfg.quals)) {
     if (!cfg.quals.length) {
-      // aucun qualité active = tout masquer
       streams = [];
     } else {
       const active = new Set(cfg.quals);
@@ -799,12 +798,6 @@ function applyUserCfg(streams, cfg) {
   }
 
   // 4) HDR : filtrage individuel par type
-  //    cfg.hdr peut être :
-  //      - un tableau de types HDR actifs (nouveau format)
-  //      - 1 / 0 (ancien format, rétro-compat)
-  //    Un flux est accepté si :
-  //      - il n'a pas de HDR, OU
-  //      - au moins un de ses HDR fait partie des types actifs
   if (Array.isArray(cfg.hdr)) {
     const allowedHdr = new Set(cfg.hdr);
     streams = streams.filter((s) => {
@@ -813,7 +806,6 @@ function applyUserCfg(streams, cfg) {
       return sh.some((h) => allowedHdr.has(h));  // au moins un HDR accepté
     });
   } else if (Number(cfg.hdr) === 0) {
-    // ancien format : tout refuser
     streams = streams.filter((s) => !(s._hdr && s._hdr.length));
   }
 
@@ -1071,7 +1063,7 @@ async function handleRequest(req, res) {
   .hint { font-size:.72rem; color:var(--dim); margin:.3rem 0 .8rem; line-height:1.4; }
 
   .lang-list, .qual-list { display:flex; flex-direction:column; gap:.35rem; }
-  .lang-item, .qual-item, .hdr-item {
+  .lang-item, .qual-item {
     display:flex; align-items:center; gap:.55rem;
     padding:.6rem .65rem;
     background:#1e2230;
@@ -1082,12 +1074,12 @@ async function handleRequest(req, res) {
     min-height:48px;
     transition:background .1s, border-color .1s, transform .1s, opacity .15s;
   }
-  .lang-item:hover, .qual-item:hover, .hdr-item:hover { border-color:#3a4254; }
-  .lang-item.on, .qual-item.on, .hdr-item.on { background:#1c2a4a; border-color:#2f4780; }
-  .lang-item.off, .qual-item.off, .hdr-item.off { opacity:.5; }
+  .lang-item:hover, .qual-item:hover { border-color:#3a4254; }
+  .lang-item.on, .qual-item.on { background:#1c2a4a; border-color:#2f4780; }
+  .lang-item.off, .qual-item.off { opacity:.5; }
   .lang-item.dragging, .qual-item.dragging { opacity:.5; transform:scale(.98); }
   .lang-item .flag { font-size:1.2rem; flex:none; }
-  .lang-item .nm, .qual-item .lbl, .hdr-item .lbl { flex:1; font-size:.86rem; }
+  .lang-item .nm, .qual-item .lbl { flex:1; font-size:.86rem; }
   .lang-item .pos, .qual-item .num {
     color:var(--dim); font-size:.68rem; font-variant-numeric:tabular-nums;
     min-width:24px; text-align:center;
@@ -1095,15 +1087,55 @@ async function handleRequest(req, res) {
     font-weight:700;
   }
   .qual-item .num { background:var(--acc); color:#fff; border-radius:50%; min-width:22px; height:22px; padding:0; line-height:22px; }
-  .lang-item .ck, .qual-item .ck, .hdr-item .ck {
+  .lang-item .ck, .qual-item .ck {
     width:20px; height:20px; border-radius:50%;
     border:2px solid var(--line); flex:none;
     display:grid; place-items:center;
     transition:all .12s;
   }
-  .lang-item.on .ck, .qual-item.on .ck, .hdr-item.on .ck { border-color:var(--ok); background:var(--ok); }
-  .lang-item.on .ck::after, .qual-item.on .ck::after, .hdr-item.on .ck::after { content:"✓"; color:#04120a; font-size:.72rem; font-weight:900; }
+  .lang-item.on .ck, .qual-item.on .ck { border-color:var(--ok); background:var(--ok); }
+  .lang-item.on .ck::after, .qual-item.on .ck::after { content:"✓"; color:#04120a; font-size:.72rem; font-weight:900; }
   .lang-item .grip, .qual-item .grip { color:var(--dim); font-size:1rem; cursor:grab; padding:0 .15rem; }
+
+  /* ==== HDR : 4 sur une seule ligne ==== */
+  .hdr-grid {
+    display:grid;
+    grid-template-columns:repeat(4, 1fr);
+    gap:.35rem;
+  }
+  .hdr-item {
+    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:.25rem;
+    padding:.55rem .25rem;
+    background:#1e2230;
+    border:1px solid var(--line);
+    border-radius:10px;
+    cursor:pointer; user-select:none;
+    touch-action:manipulation;
+    min-height:64px;
+    font-size:.72rem;
+    line-height:1.15;
+    text-align:center;
+    transition:background .1s, border-color .1s, opacity .15s;
+    overflow:hidden;
+  }
+  .hdr-item .lbl {
+    font-size:.7rem;
+    font-weight:600;
+    white-space:nowrap;
+    overflow:hidden;
+    text-overflow:ellipsis;
+    max-width:100%;
+  }
+  .hdr-item.on { background:#1c2a4a; border-color:#2f4780; }
+  .hdr-item.off { opacity:.5; }
+  .hdr-item .ck {
+    width:18px; height:18px; border-radius:50%;
+    border:2px solid var(--line); flex:none;
+    display:grid; place-items:center;
+    transition:all .12s;
+  }
+  .hdr-item.on .ck { border-color:var(--ok); background:var(--ok); }
+  .hdr-item.on .ck::after { content:"✓"; color:#04120a; font-size:.7rem; font-weight:900; }
 
   .btn-more {
     width:100%; padding:.7rem;
@@ -1220,19 +1252,16 @@ async function handleRequest(req, res) {
     <section class="section" id="tab-opts">
       <h2>⚙️ Options</h2>
 
-      <!-- HDR : options individuelles -->
+      <!-- HDR : 4 sur une seule ligne -->
       <div style="margin-bottom:.8rem;">
-        <div style="font-size:.84rem; margin-bottom:.5rem;">
-          📺 HDR / Dolby Vision
-          <span style="display:flex; gap:.3rem; float:right;">
-            <button class="mini-btn" id="hdrAll" style="font-size:.68rem; padding:.35rem .55rem; border:1px solid var(--line); background:transparent; color:var(--dim); border-radius:6px; cursor:pointer;">Tout</button>
-            <button class="mini-btn" id="hdrNone" style="font-size:.68rem; padding:.35rem .55rem; border:1px solid var(--line); background:transparent; color:var(--dim); border-radius:6px; cursor:pointer;">Rien</button>
+        <div style="font-size:.84rem; margin-bottom:.5rem; display:flex; align-items:center; justify-content:space-between; gap:.5rem;">
+          <span>📺 HDR / Dolby Vision</span>
+          <span style="display:flex; gap:.3rem;">
+            <button id="hdrAll" style="font-size:.68rem; padding:.35rem .55rem; border:1px solid var(--line); background:transparent; color:var(--dim); border-radius:6px; cursor:pointer;">Tout</button>
+            <button id="hdrNone" style="font-size:.68rem; padding:.35rem .55rem; border:1px solid var(--line); background:transparent; color:var(--dim); border-radius:6px; cursor:pointer;">Rien</button>
           </span>
         </div>
-        <small style="display:block; color:var(--dim); font-size:.7rem; margin-bottom:.5rem;">
-          Activez les formats HDR que vous voulez autoriser. Les vidéos sans HDR sont toujours autorisées.
-        </small>
-        <div id="hdrs" class="qual-list"></div>
+        <div id="hdrs" class="hdr-grid"></div>
       </div>
 
       <div class="opt-row" style="flex-direction:column;align-items:stretch;">
@@ -1289,7 +1318,7 @@ const QUALS = [
 const HDRS = [
   { k:"HDR10",  label:"HDR10" },
   { k:"HDR10+", label:"HDR10+" },
-  { k:"DV",     label:"Dolby Vision" },
+  { k:"DV",     label:"DV" },
   { k:"10bit",  label:"10-bit" },
 ];
 
@@ -1307,7 +1336,6 @@ let showOthers = false;
 
 const langByCode = Object.fromEntries(ALL_LANGS.map(l => [l.code, l]));
 const qualByKey = Object.fromEntries(QUALS.map(q => [q.k, q]));
-const hdrByKey  = Object.fromEntries(HDRS.map(h => [h.k, h]));
 
 document.querySelectorAll('.tabs button').forEach(b => {
   b.onclick = () => {
@@ -1453,7 +1481,7 @@ document.getElementById("toggleOthers").onclick = () => { showOthers = !showOthe
 document.getElementById("langAll").onclick  = () => { Object.keys(langOn).forEach(k => langOn[k] = true);  save("langOn", langOn); renderLangs(); update(); };
 document.getElementById("langNone").onclick = () => { Object.keys(langOn).forEach(k => langOn[k] = false); save("langOn", langOn); renderLangs(); update(); };
 
-// ==== HDR individuel ====
+// ==== HDR individuel (4 sur une ligne) ====
 const hdrsBox = document.getElementById("hdrs");
 function renderHdrs() {
   hdrsBox.innerHTML = "";
@@ -1462,8 +1490,8 @@ function renderHdrs() {
     el.className = "hdr-item" + (hdrOn[h.k] ? " on" : " off");
     el.dataset.k = h.k;
     el.innerHTML =
-      '<span class="lbl">' + h.label + '</span>' +
-      '<span class="ck"></span>';
+      '<span class="ck"></span>' +
+      '<span class="lbl">' + h.label + '</span>';
     el.onclick = () => {
       hdrOn[h.k] = !hdrOn[h.k];
       save("hdrOn", hdrOn);
@@ -1493,7 +1521,7 @@ function buildCfg() {
   return {
     quals:  qualOrder.filter(k => qualOn[k]),
     langs:  langOrder.filter(c => langOn[c]),
-    hdr:    HDRS.map(h => h.k).filter(k => hdrOn[k]),  // tableau des HDR actifs
+    hdr:    HDRS.map(h => h.k).filter(k => hdrOn[k]),
     size:   maxSize,
     minPct,
   };
@@ -1506,11 +1534,11 @@ function update() {
   document.getElementById("url").textContent = url;
   document.getElementById("install").href = "stremio://" + url.replace(/^https?:\\/\\//, "");
 
-  const nbQ  = cfg.quals.length;
-  const nbL  = cfg.langs.length;
-  const nbH  = cfg.hdr.length;
+  const nbQ = cfg.quals.length;
+  const nbL = cfg.langs.length;
+  const nbH = cfg.hdr.length;
   document.getElementById("summary").textContent =
-    "v1.7.8 · " + nbQ + "/" + QUALS.length + " Q · " + nbL + "/" + ALL_LANGS.length + " L · " +
+    "v1.7.9 · " + nbQ + "/" + QUALS.length + " Q · " + nbL + "/" + ALL_LANGS.length + " L · " +
     nbH + "/" + HDRS.length + " H · " + (maxSize ? maxSize + "Go" : "∞") + " · " + minPct + "%";
 }
 
