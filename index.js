@@ -697,6 +697,14 @@ function formatStream({ doc, picked }, ctx) {
 
   const title = buildStreamTitle({ doc, picked, ctx, pct });
 
+  // internal metadata (non-Stremio) for user config filtering/sorting
+  const qualKey =
+    q.res === "4K" ? "4k" :
+    q.res === "1080p" ? "1080" :
+    q.res === "720p" ? "720" :
+    (q.res === "480p" || q.res === "576p") ? "480" :
+    q.rank === 1 ? "low" : "unk";
+
   return {
     pct,
     rank: q.rank,
@@ -708,6 +716,10 @@ function formatStream({ doc, picked }, ctx) {
         notWebReady: SHOW_NOT_WEB_READY ? false : NOT_WEB_READY.has(ext),
         filename: fileName,
       },
+      _qual: qualKey,
+      _size: Number(f.size) || 0,
+      _hdr: q.hdr || [],
+      _langs: [].concat(doc.language || []),
     },
   };
 }
@@ -775,10 +787,42 @@ async function findStreams(meta, series, imdbId) {
   return out;
 }
 
+// ---------- user config (langues / qualité / hdr / taille) ----------
+function applyUserCfg(streams, cfg) {
+  if (!cfg) return streams;
+
+  // 1) langues masquées
+  const allowed = new Set((cfg.langs || []).map((l) => String(l).toLowerCase().slice(0, 2)));
+  if (allowed.size) {
+    streams = streams.filter((s) => {
+      const langs = (s._langs || []).map((l) => String(l).toLowerCase().slice(0, 2));
+      return !langs.length || langs.some((l) => allowed.has(l));
+    });
+  }
+
+  // 2) taille max (Go)
+  if (cfg.size) {
+    const maxBytes = Number(cfg.size) * 1e9;
+    streams = streams.filter((s) => !s._size || s._size <= maxBytes);
+  }
+
+  // 3) HDR refusé
+  if (Number(cfg.hdr) === 0) {
+    streams = streams.filter((s) => !(s._hdr && s._hdr.length));
+  }
+
+  // 4) tri par ordre de qualité choisi
+  const order = new Map((cfg.quals || []).map((k, i) => [k, i]));
+  const rankOf = (s) => (order.has(s._qual) ? order.get(s._qual) : 99);
+  streams = streams.slice().sort((a, b) => rankOf(a) - rankOf(b));
+
+  return streams;
+}
+
 const cache = new Map();
 const builder = new addonBuilder(manifest);
 
-async function searchAndStore(type, id, isRefresh) {
+async function searchAndStore(type, id, isRefresh, cfg) {
   const [baseId, s, e] = id.split(":");
   const meta = await getMeta(type, baseId);
   if (!meta) return null;
@@ -792,7 +836,8 @@ async function searchAndStore(type, id, isRefresh) {
     series = { season, ep, epTitle: v ? v.name || v.title || "" : "" };
   }
 
-  const streams = await findStreams(meta, series, baseId);
+  let streams = await findStreams(meta, series, baseId);
+  streams = applyUserCfg(streams, cfg);
   console.log(`  -> ${streams.length} Internet Archive result(s)${isRefresh ? " (background refresh)" : ""}`);
   if (streams.length) cache.set(id, { t: Date.now(), at: Date.now(), streams });
   if (DB_ON && streams.length && streams.complete) {
@@ -812,13 +857,14 @@ async function searchAndStore(type, id, isRefresh) {
 }
 
 const refreshing = new Set();
-function refreshInBackground(type, id) {
-  if (refreshing.has(id)) return;
-  refreshing.add(id);
+function refreshInBackground(type, id, cfg) {
+  const key = id + "|" + JSON.stringify(cfg || {});
+  if (refreshing.has(key)) return;
+  refreshing.add(key);
   console.log("  (cached result is old, searching again in the background)");
-  searchAndStore(type, id, true)
+  searchAndStore(type, id, true, cfg)
     .catch((e) => console.log("  background refresh failed: " + e.message))
-    .finally(() => refreshing.delete(id));
+    .finally(() => refreshing.delete(key));
 }
 
 builder.defineStreamHandler(async ({ type, id }) => {
@@ -827,7 +873,7 @@ builder.defineStreamHandler(async ({ type, id }) => {
   if (hit && Date.now() - hit.t < CACHE_MS) {
     const stale = Date.now() - hit.at > REFRESH_AFTER_MS;
     console.log(`  -> ${hit.streams.length} result(s) from cache (memory), saved ${fmtAgo(Date.now() - hit.at)}`);
-    if (stale) refreshInBackground(type, id);
+    if (stale) refreshInBackground(type, id, null);
     return { streams: markCached(hit.streams, hit.at, stale) };
   }
   try {
@@ -837,11 +883,11 @@ builder.defineStreamHandler(async ({ type, id }) => {
         const stale = Date.now() - stored.t > REFRESH_AFTER_MS;
         console.log(`  -> ${stored.streams.length} result(s) from cache (${CACHE_DIR ? "file" : "database"}), saved ${fmtAgo(Date.now() - stored.t)}`);
         cache.set(id, { t: Date.now(), at: stored.t, streams: stored.streams });
-        if (stale) refreshInBackground(type, id);
+        if (stale) refreshInBackground(type, id, null);
         return { streams: markCached(stored.streams, stored.t, stale) };
       }
     }
-    const streams = await searchAndStore(type, id, false);
+    const streams = await searchAndStore(type, id, false, null);
     return { streams: streams || [] };
   } catch (e) {
     console.log("Stream handler error:", e.message);
@@ -851,11 +897,23 @@ builder.defineStreamHandler(async ({ type, id }) => {
 
 const addonInterface = builder.getInterface();
 
+// ---------- config page languages ----------
+const ALL_LANGS = [
+  { code: "en", name: "🇬🇧 English" }, { code: "fr", name: "🇫🇷 Français" },
+  { code: "es", name: "🇪🇸 Español" }, { code: "de", name: "🇩🇪 Deutsch" },
+  { code: "it", name: "🇮🇹 Italiano" }, { code: "pt", name: "🇵🇹 Português" },
+  { code: "ru", name: "🇷🇺 Русский" }, { code: "ja", name: "🇯🇵 日本語" },
+  { code: "ko", name: "🇰🇷 한국어" }, { code: "zh", name: "🇨🇳 中文" },
+  { code: "hi", name: "🇮🇳 हिन्दी" }, { code: "ar", name: "🇸🇦 العربية" },
+  { code: "nl", name: "🇳🇱 Nederlands" }, { code: "sv", name: "🇸🇪 Svenska" },
+  { code: "pl", name: "🇵🇱 Polski" }, { code: "tr", name: "🇹🇷 Türkçe" },
+];
+
 async function handleRequest(req, res) {
   const proto = req.headers["x-forwarded-proto"] || "http";
   const host = req.headers["x-forwarded-host"] || req.headers.host || "localhost";
   const url = new URL(req.url, `${proto}://${host}`);
-  const pathname = url.pathname;
+  let pathname = url.pathname;
 
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "*");
@@ -863,6 +921,21 @@ async function handleRequest(req, res) {
   if (req.method === "OPTIONS") {
     res.statusCode = 204;
     return res.end();
+  }
+
+  // URL avec config : /<base64>/manifest.json  et  /<base64>/stream/...
+  const cfgMatch = pathname.match(/^\/([A-Za-z0-9+/=_-]+)\/(manifest\.json|stream\/.*)$/);
+  let userCfg = null;
+  if (cfgMatch) {
+    try {
+      const raw = Buffer.from(cfgMatch[1].replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object") userCfg = parsed;
+    } catch (e) {}
+    if (userCfg) {
+      pathname = "/" + cfgMatch[2];
+      url.pathname = pathname;
+    }
   }
 
   if (pathname === "/manifest.json" || pathname === "/") {
@@ -875,6 +948,22 @@ async function handleRequest(req, res) {
   if (streamMatch) {
     const type = streamMatch[1];
     const id = decodeURIComponent(streamMatch[2]);
+
+    // si une config est fournie, on court-circuite le cache "brut" et on applique le filtre
+    if (userCfg) {
+      try {
+        const streams = await searchAndStore(type, id, false, userCfg);
+        res.setHeader("Content-Type", "application/json; charset=utf-8");
+        res.setHeader("Cache-Control", "no-store");
+        return res.end(JSON.stringify({ streams: streams || [] }));
+      } catch (e) {
+        console.log("Stream route (cfg) error:", e.message);
+        res.statusCode = 500;
+        res.setHeader("Content-Type", "application/json; charset=utf-8");
+        return res.end(JSON.stringify({ streams: [], err: e.message }));
+      }
+    }
+
     try {
       const result = await addonInterface.get("stream", type, id);
       res.setHeader("Content-Type", "application/json; charset=utf-8");
@@ -891,15 +980,163 @@ async function handleRequest(req, res) {
   if (pathname === "/configure") {
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     return res.end(`<!DOCTYPE html>
-<html><head><title>${addonInterface.manifest.name}</title>
+<html lang="fr"><head>
+<meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<style>body{font-family:system-ui,sans-serif;max-width:600px;margin:2rem auto;padding:1rem;}</style>
-</head><body>
-<h1>${addonInterface.manifest.name}</h1>
-<p>${addonInterface.manifest.description}</p>
-<p>Version ${addonInterface.manifest.version}</p>
-<p>Cette addon n'a pas d'options de configuration. Installez-la directement via :</p>
-<pre>${url.origin}/manifest.json</pre>
+<title>${addonInterface.manifest.name} — Configuration</title>
+<style>
+  :root { --bg:#0f1117; --card:#171a23; --line:#2a2f3d; --txt:#e6e9f0; --dim:#8b93a7; --acc:#5b8cff; --ok:#3ddc84; }
+  * { box-sizing:border-box; }
+  body { font-family:system-ui,-apple-system,sans-serif; max-width:760px; margin:0 auto; padding:1.2rem; background:var(--bg); color:var(--txt); }
+  h1 { font-size:1.35rem; margin:.2rem 0 .4rem; }
+  h2 { font-size:1rem; margin:1.6rem 0 .6rem; color:var(--acc); display:flex; align-items:center; gap:.4rem; }
+  p.sub { color:var(--dim); font-size:.9rem; margin:0 0 1rem; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:1rem; margin-bottom:1rem; }
+  .row { display:flex; align-items:center; justify-content:space-between; gap:.6rem; padding:.45rem 0; border-bottom:1px solid var(--line); }
+  .row:last-child { border-bottom:none; }
+  .row label { flex:1; font-size:.93rem; }
+  .row small { display:block; color:var(--dim); font-size:.78rem; margin-top:.15rem; }
+  .btns { display:flex; gap:.35rem; }
+  .btns button { border:1px solid var(--line); background:transparent; color:var(--dim); border-radius:8px; padding:.3rem .55rem; font-size:.8rem; cursor:pointer; }
+  .btns button.on { background:var(--acc); border-color:var(--acc); color:#fff; }
+  .order { display:flex; flex-direction:column; gap:.4rem; }
+  .ord { display:flex; align-items:center; gap:.5rem; background:#1e2230; border:1px solid var(--line); border-radius:10px; padding:.45rem .6rem; cursor:grab; user-select:none; }
+  .ord .num { background:var(--acc); color:#fff; border-radius:50%; width:22px; height:22px; display:grid; place-items:center; font-size:.75rem; font-weight:600; flex:none; }
+  .ord .h { margin-left:auto; color:var(--dim); font-size:1rem; }
+  input[type=range] { width:100%; }
+  .val { color:var(--acc); font-weight:600; }
+  .install { display:block; text-align:center; background:var(--ok); color:#04120a; font-weight:700; padding:.9rem; border-radius:12px; text-decoration:none; margin-top:1.2rem; }
+  .url { word-break:break-all; font-size:.75rem; color:var(--dim); background:#0b0d12; padding:.6rem; border-radius:8px; margin-top:.6rem; }
+  .note { font-size:.8rem; color:var(--dim); margin-top:.5rem; }
+</style></head><body>
+
+<h1>🏛 ${addonInterface.manifest.name}</h1>
+<p class="sub">${addonInterface.manifest.description} · v${addonInterface.manifest.version}</p>
+
+<h2>🗣️ Langues</h2>
+<div class="card">
+  <div id="langs"></div>
+  <p class="note">Touchez pour afficher/masquer. Glissez pour trier (priorité aux langues en haut).</p>
+</div>
+
+<h2>🎞️ Qualité d'image</h2>
+<div class="card">
+  <div class="order" id="quals"></div>
+  <p class="note">Ordre de préférence : le haut = prioritaire dans les résultats.</p>
+</div>
+
+<div class="card">
+  <div class="row"><label>📺 HDR / DV accepté<small>HDR10, HDR10+, Dolby Vision, 10bit</small></label>
+    <div class="btns" data-k="hdr"><button data-v="1">Oui</button><button data-v="0">Non</button></div></div>
+</div>
+
+<h2>📦 Taille des fichiers</h2>
+<div class="card">
+  <div class="row"><label>📏 Taille maximale <small>0 = pas de limite</small></label>
+    <span class="val" id="sizeVal">Illimitée</span></div>
+  <input type="range" id="size" min="0" max="20" step="0.5" value="0">
+  <p class="note">Filtre les fichiers plus gros que cette taille (en Go). Utile pour éviter les fichiers trop lourds.</p>
+</div>
+
+<a class="install" id="install" href="#">▶ Installer dans Stremio</a>
+<div class="url" id="url"></div>
+
+<script>
+const LANGS = ${JSON.stringify(ALL_LANGS)};
+const QUALS = [
+  { k:"4k",  label:"🔥 4K / 2160p", rank:5 },
+  { k:"1080",label:"⭐ 1080p",       rank:4 },
+  { k:"720", label:"✅ 720p",        rank:3 },
+  { k:"480", label:"📼 480p / 576p", rank:2 },
+  { k:"low", label:"📺 360p et moins",rank:1 },
+  { k:"unk", label:"❓ Inconnue",     rank:0 },
+];
+const DEF_LANGS = LANGS.map(l => ({ code:l.code, name:l.name, on:true }));
+const DEF_QUALS = QUALS.map(q => ({ ...q }));
+
+function load(key, def) {
+  try { const v = JSON.parse(localStorage.getItem("ia_cfg_"+key)); return v || def; } catch(e){ return def; }
+}
+function save(key, v) { localStorage.setItem("ia_cfg_"+key, JSON.stringify(v)); }
+
+let langState  = load("langs", DEF_LANGS);
+let qualState  = load("quals", DEF_QUALS);
+let hdr        = load("hdr", 1);
+let maxSize    = load("size", 0);
+
+// ---- Langues ----
+const langsBox = document.getElementById("langs");
+function renderLangs() {
+  langsBox.innerHTML = "";
+  langState.forEach((l) => {
+    const row = document.createElement("div");
+    row.className = "row";
+    row.innerHTML = '<label>'+l.name+'</label>'+
+      '<div class="btns"><button data-v="1" class="'+(l.on?'on':'')+'">Afficher</button>'+
+      '<button data-v="0" class="'+(!l.on?'on':'')+'">Masquer</button></div>';
+    row.querySelectorAll("button").forEach(b => b.onclick = () => {
+      l.on = b.dataset.v === "1"; save("langs", langState); renderLangs(); update();
+    });
+    langsBox.appendChild(row);
+  });
+}
+renderLangs();
+
+// ---- Qualités (drag & drop) ----
+const qualsBox = document.getElementById("quals");
+function renderQuals() {
+  qualsBox.innerHTML = "";
+  qualState.forEach((q, i) => {
+    const el = document.createElement("div");
+    el.className = "ord"; el.draggable = true; el.dataset.i = i;
+    el.innerHTML = '<span class="num">'+(i+1)+'</span><span>'+q.label+'</span><span class="h">☰</span>';
+    el.ondragstart = e => e.dataTransfer.setData("text/plain", i);
+    el.ondragover = e => e.preventDefault();
+    el.ondrop = e => {
+      e.preventDefault();
+      const from = +e.dataTransfer.getData("text/plain"), to = i;
+      if (from === to) return;
+      const [m] = qualState.splice(from,1); qualState.splice(to,0,m);
+      save("quals", qualState); renderQuals(); update();
+    };
+    qualsBox.appendChild(el);
+  });
+}
+renderQuals();
+
+// ---- HDR ----
+document.querySelectorAll('[data-k="hdr"] button').forEach(b => {
+  if (String(hdr) === b.dataset.v) b.classList.add("on");
+  b.onclick = () => {
+    hdr = +b.dataset.v; save("hdr", hdr);
+    document.querySelectorAll('[data-k="hdr"] button').forEach(x => x.classList.toggle("on", x === b));
+    update();
+  };
+});
+
+// ---- Taille ----
+const sizeEl = document.getElementById("size"), sizeVal = document.getElementById("sizeVal");
+sizeEl.value = maxSize;
+function sizeText(v){ return v == 0 ? "Illimitée" : v + " Go max"; }
+sizeVal.textContent = sizeText(maxSize);
+sizeEl.oninput = () => { maxSize = +sizeEl.value; sizeVal.textContent = sizeText(maxSize); save("size", maxSize); update(); };
+
+// ---- URL d'installation ----
+function buildCfg() {
+  const langs = langState.filter(l => l.on).map(l => l.code);
+  const quals = qualState.map(q => q.k);
+  return { langs, quals, hdr, size: maxSize };
+}
+function update() {
+  const cfg = buildCfg();
+  const b64 = btoa(unescape(encodeURIComponent(JSON.stringify(cfg)))).replace(/=+$/,"").replace(/\\+/g,"-").replace(/\\//g,"_");
+  const url = location.origin + "/" + b64 + "/manifest.json";
+  document.getElementById("url").textContent = url;
+  const inst = document.getElementById("install");
+  inst.href = "stremio://" + url.replace(/^https?:\\/\\//,"");
+}
+update();
+</script>
 </body></html>`);
   }
 
@@ -929,6 +1166,7 @@ if (require.main === module) {
     console.log("This phone:     http://" + local);
     console.log("Tap to install: stremio://" + local);
     if (lan) console.log("Other devices:  http://" + lan.address + ":" + PORT + "/manifest.json");
+    console.log("Config page:    http://" + (lan ? lan.address : "127.0.0.1") + ":" + PORT + "/configure");
     console.log("===================================\n");
 
     if (CACHE_DIR) {
