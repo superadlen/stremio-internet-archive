@@ -25,7 +25,7 @@ const ARCHIVE_KEY = process.env.ARCHIVE_KEY || "";
 
 // ---------- Result cache ----------
 const DB_URL = (process.env.UPSTASH_REDIS_REST_URL || "").replace(/\/+$/, "");
-const DB_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || "";
+const DB_TOKEN = (process.env.UPSTASH_REDIS_REST_TOKEN || "").replace(/\/+$/, "");
 const CACHE_DIR = process.env.CACHE_DIR || "";
 const DB_ON = !!(DB_URL && DB_TOKEN) || !!CACHE_DIR;
 const cacheFile = (id) => path.join(CACHE_DIR, String(id).replace(/[^a-zA-Z0-9._-]/g, "_") + ".json");
@@ -106,7 +106,7 @@ const NOT_WEB_READY = new Set(["mkv", "avi", "ogv", "wmv", "flv", "mpg", "mpeg",
 
 const manifest = {
   id: "org.example.archivemoviesearch",
-  version: "1.7.5",
+  version: "1.7.6",
   name: "Archive-DZ",
   description: "🎬 Films et séries en streaming depuis Internet Archive — Public domain & contenus libres, avec tri par langue, qualité et taille.",
   logo: "https://i.pinimg.com/1200x/fb/0d/cc/fb0dccec209770b71f8570c3bb8a38b7.jpg",
@@ -949,190 +949,275 @@ async function handleRequest(req, res) {
   }
 
   if (pathname === "/configure") {
+    const LOGO = addonInterface.manifest.logo;
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     return res.end(`<!DOCTYPE html>
 <html lang="fr"><head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0d12">
 <title>${addonInterface.manifest.name} — Configuration</title>
+<link rel="icon" type="image/jpeg" href="${LOGO}">
+<link rel="apple-touch-icon" href="${LOGO}">
 <style>
-  :root { --bg:#0f1117; --card:#171a23; --line:#2a2f3d; --txt:#e6e9f0; --dim:#8b93a7; --acc:#5b8cff; --ok:#3ddc84; }
-  * { box-sizing:border-box; }
-  html,body { height:100%; margin:0; }
+  :root { --bg:#0f1117; --card:#171a23; --line:#2a2f3d; --txt:#e6e9f0; --dim:#8b93a7; --acc:#5b8cff; --ok:#3ddc84; --safe-b: env(safe-area-inset-bottom, 0px); }
+  * { box-sizing:border-box; -webkit-tap-highlight-color: transparent; }
+  html,body { height:100%; margin:0; overscroll-behavior:none; }
   body {
     font-family:system-ui,-apple-system,sans-serif;
     background:radial-gradient(ellipse at top, #1a1f2e 0%, #0b0d12 70%);
     color:var(--txt);
-    display:grid; place-items:center;
-    padding:1rem;
+    display:flex; justify-content:center; align-items:flex-start;
+    padding:0;
+    min-height:100dvh;
   }
   .modal {
-    width:min(920px, 100%);
-    max-height:calc(100vh - 2rem);
+    width:100%;
+    max-width:920px;
     background:var(--card);
-    border:1px solid var(--line);
-    border-radius:18px;
-    box-shadow:0 20px 60px rgba(0,0,0,.6);
+    border-left:1px solid var(--line);
+    border-right:1px solid var(--line);
     display:flex; flex-direction:column;
+    min-height:100dvh;
     overflow:hidden;
   }
+  @media (min-width:960px) {
+    body { padding:1rem; align-items:center; }
+    .modal {
+      min-height:auto;
+      max-height:calc(100vh - 2rem);
+      border:1px solid var(--line);
+      border-radius:18px;
+      box-shadow:0 20px 60px rgba(0,0,0,.6);
+    }
+  }
+
+  /* ==== HEADER avec logo ==== */
   .modal header {
-    display:flex; align-items:center; gap:.6rem;
-    padding:1rem 1.2rem;
+    display:grid;
+    grid-template-columns:auto 1fr auto;
+    align-items:center;
+    gap:.8rem;
+    padding:.85rem 1rem;
     border-bottom:1px solid var(--line);
     background:#12151c;
-    flex-wrap:wrap;
+    position:sticky; top:0; z-index:5;
   }
-  .modal header h1 { font-size:1.05rem; margin:0; }
-  .modal header .desc { width:100%; font-size:.75rem; color:var(--dim); margin-top:.2rem; }
-  .modal header .ver { color:var(--dim); font-size:.75rem; margin-left:auto; }
-  .modal header .badge { font-size:.65rem; padding:.15rem .5rem; border-radius:6px; background:#1c2a4a; color:var(--acc); }
+  .logo {
+    width:44px; height:44px; border-radius:10px;
+    object-fit:cover; background:#0b0d12;
+    border:1px solid var(--line);
+    flex:none;
+  }
+  .title-block { min-width:0; }
+  .title-block h1 { font-size:1rem; margin:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .title-block .desc { font-size:.72rem; color:var(--dim); margin-top:.2rem; line-height:1.3;
+    display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+  .badge { font-size:.65rem; padding:.2rem .55rem; border-radius:6px; background:#1c2a4a; color:var(--acc); white-space:nowrap; }
+
+  /* ==== TABS ==== */
   .tabs {
     display:flex;
     border-bottom:1px solid var(--line);
     background:#12151c;
-    padding:0 .5rem;
+    padding:0 .4rem;
     gap:.2rem;
+    overflow-x:auto;
+    scrollbar-width:none;
+    -webkit-overflow-scrolling:touch;
+    position:sticky; top:61px; z-index:4;
   }
+  .tabs::-webkit-scrollbar { display:none; }
   .tabs button {
-    background:transparent;
-    border:none;
-    color:var(--dim);
-    padding:.75rem 1rem;
-    font-size:.85rem;
-    font-weight:600;
+    background:transparent; border:none; color:var(--dim);
+    padding:.85rem 1rem;
+    font-size:.85rem; font-weight:600;
     cursor:pointer;
     border-bottom:2px solid transparent;
     display:flex; align-items:center; gap:.4rem;
+    white-space:nowrap;
+    min-height:44px;
     transition:color .15s, border-color .15s;
   }
   .tabs button:hover { color:var(--txt); }
   .tabs button.active { color:var(--acc); border-bottom-color:var(--acc); }
+
+  /* ==== CONTENU ==== */
   .content {
-    flex:1;
-    overflow-y:auto;
-    padding:1rem 1.2rem;
+    flex:1; overflow-y:auto;
+    padding:1rem 1rem calc(1rem + var(--safe-b));
     min-height:280px;
+    -webkit-overflow-scrolling:touch;
   }
-  .content::-webkit-scrollbar { width:8px; }
-  .content::-webkit-scrollbar-thumb { background:var(--line); border-radius:8px; }
+  .content::-webkit-scrollbar { width:6px; }
+  .content::-webkit-scrollbar-thumb { background:var(--line); border-radius:6px; }
   .section { display:none; }
-  .section.active { display:block; }
-  .section h2 { font-size:.9rem; color:var(--acc); margin:0 0 .6rem; display:flex; align-items:center; justify-content:space-between; gap:.5rem; }
+  .section.active { display:block; animation: fadeIn .15s ease; }
+  @keyframes fadeIn { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:none; } }
+
+  .section h2 {
+    font-size:.9rem; color:var(--acc); margin:0 0 .6rem;
+    display:flex; align-items:center; justify-content:space-between; gap:.5rem;
+  }
   .section h2 .mini { display:flex; gap:.3rem; }
   .section h2 button {
-    font-size:.7rem; padding:.25rem .55rem;
-    border-radius:6px; border:1px solid var(--line);
+    font-size:.72rem; padding:.45rem .7rem;
+    border-radius:8px; border:1px solid var(--line);
     background:transparent; color:var(--dim); cursor:pointer;
+    min-height:36px;
   }
   .section h2 button:hover { color:var(--txt); border-color:var(--acc); }
-  .hint { font-size:.75rem; color:var(--dim); margin:.3rem 0 .8rem; }
-  .lang-list { display:flex; flex-direction:column; gap:.35rem; }
+  .hint { font-size:.75rem; color:var(--dim); margin:.3rem 0 .8rem; line-height:1.4; }
+
+  /* ==== LANGUES ==== */
+  .lang-list { display:flex; flex-direction:column; gap:.4rem; }
   .lang-item {
-    display:flex; align-items:center; gap:.6rem;
-    padding:.5rem .7rem;
+    display:flex; align-items:center; gap:.7rem;
+    padding:.7rem .8rem;
     background:#1e2230;
     border:1px solid var(--line);
-    border-radius:10px;
-    cursor:grab;
-    user-select:none;
-    transition:background .1s, border-color .1s;
+    border-radius:12px;
+    cursor:grab; user-select:none;
+    touch-action:manipulation;
+    min-height:52px;
+    transition:background .1s, border-color .1s, transform .1s;
   }
   .lang-item:hover { border-color:#3a4254; }
   .lang-item.on { background:#1c2a4a; border-color:#2f4780; }
-  .lang-item.dragging { opacity:.4; }
+  .lang-item.dragging { opacity:.5; transform:scale(.98); }
   .lang-item.drag-over { border-color:var(--acc); background:#243358; }
-  .lang-item .flag { font-size:1.15rem; }
-  .lang-item .nm { flex:1; font-size:.88rem; }
-  .lang-item .pos { color:var(--dim); font-size:.7rem; font-variant-numeric:tabular-nums; min-width:22px; text-align:center; }
+  .lang-item .flag { font-size:1.3rem; flex:none; }
+  .lang-item .nm { flex:1; font-size:.92rem; }
+  .lang-item .pos {
+    color:var(--dim); font-size:.72rem; font-variant-numeric:tabular-nums;
+    min-width:26px; text-align:center;
+    background:#0b0d12; border-radius:6px; padding:.15rem 0;
+  }
   .lang-item .ck {
-    width:18px; height:18px; border-radius:50%;
+    width:22px; height:22px; border-radius:50%;
     border:2px solid var(--line); flex:none;
     display:grid; place-items:center;
+    transition:all .12s;
   }
   .lang-item.on .ck { border-color:var(--ok); background:var(--ok); }
-  .lang-item.on .ck::after { content:"✓"; color:#04120a; font-size:.75rem; font-weight:900; }
-  .lang-item .grip { color:var(--dim); font-size:.9rem; cursor:grab; }
+  .lang-item.on .ck::after { content:"✓"; color:#04120a; font-size:.8rem; font-weight:900; }
+  .lang-item .grip { color:var(--dim); font-size:1.05rem; cursor:grab; padding:0 .2rem; }
+
   .btn-more {
-    width:100%; padding:.55rem;
+    width:100%; padding:.8rem;
     background:transparent; border:1px dashed var(--line);
-    color:var(--dim); border-radius:10px; cursor:pointer;
-    font-size:.8rem; margin-top:.5rem;
+    color:var(--dim); border-radius:12px; cursor:pointer;
+    font-size:.85rem; margin-top:.6rem;
+    min-height:44px;
   }
   .btn-more:hover { color:var(--acc); border-color:var(--acc); }
+
+  /* ==== QUALITÉ ==== */
   .qual-item {
-    display:flex; align-items:center; gap:.6rem;
-    padding:.6rem .75rem; margin-bottom:.4rem;
+    display:flex; align-items:center; gap:.7rem;
+    padding:.8rem .85rem; margin-bottom:.45rem;
     background:#1e2230; border:1px solid var(--line);
-    border-radius:10px; cursor:grab; user-select:none;
+    border-radius:12px; cursor:grab; user-select:none;
+    touch-action:manipulation;
+    min-height:52px;
+    transition:background .1s, border-color .1s, transform .1s;
   }
-  .qual-item.dragging { opacity:.4; }
+  .qual-item.dragging { opacity:.5; transform:scale(.98); }
   .qual-item .num {
     background:var(--acc); color:#fff; border-radius:50%;
-    width:22px; height:22px; display:grid; place-items:center;
-    font-size:.72rem; font-weight:700; flex:none;
+    width:24px; height:24px; display:grid; place-items:center;
+    font-size:.75rem; font-weight:700; flex:none;
   }
-  .qual-item .lbl { flex:1; font-size:.86rem; }
+  .qual-item .lbl { flex:1; font-size:.9rem; }
   .qual-item .grip { color:var(--dim); }
+
+  /* ==== OPTIONS ==== */
   .opt-row {
     display:flex; align-items:center; justify-content:space-between;
-    gap:.6rem; padding:.7rem 0;
+    gap:.7rem; padding:.9rem 0;
     border-bottom:1px solid var(--line);
   }
   .opt-row:last-of-type { border-bottom:none; }
-  .opt-row label { font-size:.85rem; flex:1; }
-  .opt-row small { display:block; color:var(--dim); font-size:.72rem; margin-top:.15rem; }
-  .toggle { display:flex; gap:.25rem; }
+  .opt-row label { font-size:.88rem; flex:1; line-height:1.35; }
+  .opt-row small { display:block; color:var(--dim); font-size:.72rem; margin-top:.25rem; font-weight:400; }
+  .toggle { display:flex; gap:.3rem; }
   .toggle button {
     border:1px solid var(--line); background:transparent;
-    color:var(--dim); border-radius:7px;
-    padding:.32rem .65rem; font-size:.78rem; cursor:pointer;
+    color:var(--dim); border-radius:8px;
+    padding:.55rem .85rem; font-size:.82rem; cursor:pointer;
+    min-width:60px; min-height:40px;
+    font-weight:600;
   }
   .toggle button.on { background:var(--acc); border-color:var(--acc); color:#fff; }
-  input[type=range] { width:100%; accent-color:var(--acc); margin-top:.4rem; }
-  .slider-val { color:var(--acc); font-weight:700; font-size:.8rem; }
+  input[type=range] {
+    width:100%; accent-color:var(--acc); margin-top:.5rem;
+    height:32px;
+  }
+  .slider-val { color:var(--acc); font-weight:700; font-size:.82rem; }
   .slider-hint { display:flex; justify-content:space-between; font-size:.7rem; color:var(--dim); margin-top:.15rem; }
+
+  /* ==== FOOTER ==== */
   .modal footer {
-    padding:.8rem 1.2rem;
+    padding:.7rem .9rem calc(.7rem + var(--safe-b));
     border-top:1px solid var(--line);
     background:#12151c;
-    display:flex; gap:.6rem; align-items:center; flex-wrap:wrap;
+    display:flex; gap:.5rem; align-items:stretch; flex-wrap:wrap;
+    position:sticky; bottom:0; z-index:5;
   }
   .urlbox {
-    flex:1; min-width:180px;
-    font-size:.7rem; color:var(--dim);
-    background:#0b0d12; padding:.5rem .7rem;
+    flex:1 1 100%; order:3;
+    font-size:.68rem; color:var(--dim);
+    background:#0b0d12; padding:.55rem .7rem;
     border-radius:8px; word-break:break-all;
     border:1px solid var(--line);
+    max-height:3.2rem; overflow:auto;
   }
+  @media (min-width:640px) { .urlbox { order:1; flex:1 1 auto; } }
   .btn {
     border:none; border-radius:10px;
-    padding:.6rem 1rem; font-size:.85rem; font-weight:700;
+    padding:.75rem 1rem; font-size:.88rem; font-weight:700;
     cursor:pointer; text-decoration:none;
-    display:inline-flex; align-items:center; gap:.35rem;
+    display:inline-flex; align-items:center; justify-content:center; gap:.4rem;
     white-space:nowrap;
+    min-height:48px;
+    flex:1;
   }
   .btn.install { background:var(--ok); color:#04120a; }
   .btn.copy    { background:var(--acc); color:#fff; }
-  .btn:hover { filter:brightness(1.1); }
+  .btn:hover { filter:brightness(1.08); }
+  .btn:active { transform:scale(.98); }
+
+  /* ==== TOAST ==== */
   #toast {
-    position:fixed; left:50%; bottom:2rem;
+    position:fixed; left:50%; bottom:calc(1.5rem + var(--safe-b));
     transform:translateX(-50%) translateY(20px);
     background:var(--ok); color:#04120a;
-    padding:.65rem 1.3rem; border-radius:10px;
+    padding:.7rem 1.4rem; border-radius:12px;
     font-weight:700; opacity:0;
     transition:all .25s; pointer-events:none; z-index:99;
     box-shadow:0 8px 24px rgba(61,220,132,.35);
+    font-size:.9rem;
   }
   #toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
+
+  /* Small mobile */
+  @media (max-width:400px) {
+    .title-block h1 { font-size:.92rem; }
+    .title-block .desc { display:none; }
+    .badge { display:none; }
+    .logo { width:38px; height:38px; }
+    .tabs { top:55px; }
+  }
 </style></head><body>
 
 <div class="modal">
   <header>
-    <h1>🏛 ${addonInterface.manifest.name}</h1>
-    <span class="ver">v${addonInterface.manifest.version}</span>
-    <span class="badge" id="summary"></span>
-    <div class="desc">${addonInterface.manifest.description}</div>
+    <img class="logo" src="${LOGO}" alt="${addonInterface.manifest.name}">
+    <div class="title-block">
+      <h1>🏛 ${addonInterface.manifest.name}</h1>
+      <div class="desc">${addonInterface.manifest.description}</div>
+    </div>
+    <span class="badge" id="summary">v${addonInterface.manifest.version}</span>
   </header>
 
   <nav class="tabs">
@@ -1153,7 +1238,7 @@ async function handleRequest(req, res) {
       <p class="hint">Glissez pour classer (haut = prioritaire). Touchez pour afficher/masquer.</p>
       <div id="langsTop" class="lang-list"></div>
       <button class="btn-more" id="toggleOthers">▼ Afficher les autres langues</button>
-      <div id="langsOthers" class="lang-list" style="display:none;margin-top:.5rem;"></div>
+      <div id="langsOthers" class="lang-list" style="display:none;margin-top:.6rem;"></div>
     </section>
 
     <section class="section" id="tab-quals">
@@ -1237,82 +1322,133 @@ document.querySelectorAll('.tabs button').forEach(b => {
   b.onclick = () => {
     document.querySelectorAll('.tabs button').forEach(x => x.classList.toggle('active', x === b));
     document.querySelectorAll('.section').forEach(s => s.classList.toggle('active', s.id === 'tab-' + b.dataset.tab));
+    // scroll top of content
+    document.querySelector('.content').scrollTop = 0;
   };
 });
 
-function renderLangs() {
-  const top    = document.getElementById("langsTop");
-  const others = document.getElementById("langsOthers");
-  top.innerHTML = "";
-  others.innerHTML = "";
+// ==== DRAG & DROP TACTILE + SOURIS ====
+function enableReorder(container, items, onMove) {
+  let dragFrom = null, placeholder = null;
+  function getEl(e) {
+    const t = e.target.closest('[data-code],[data-i]');
+    return t || null;
+  }
+  container.addEventListener('pointerdown', (e) => {
+    const el = getEl(e);
+    if (!el) return;
+    // ignore click on checkbox dot (handled separately)
+    if (e.target.classList.contains('ck')) return;
+    dragFrom = el;
+    el.classList.add('dragging');
+    const rect = el.getBoundingClientRect();
+    placeholder = document.createElement('div');
+    placeholder.style.cssText = 'height:'+rect.height+'px;border:2px dashed '+getComputedStyle(document.documentElement).getPropertyValue('--acc')+';border-radius:12px;opacity:.4';
+    el.parentNode.insertBefore(placeholder, el.nextSibling);
+    el.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  });
+  container.addEventListener('pointermove', (e) => {
+    if (!dragFrom) return;
+    const after = document.elementFromPoint(e.clientX, e.clientY)?.closest('[data-code],[data-i]');
+    if (!after || after === dragFrom) return;
+    const afterRect = after.getBoundingClientRect();
+    const midY = afterRect.top + afterRect.height / 2;
+    const ref = (e.clientY < midY) ? after : after.nextSibling;
+    if (ref === placeholder) return;
+    container.insertBefore(placeholder, ref);
+  });
+  function finish(e) {
+    if (!dragFrom) return;
+    const newPos = Array.from(container.children).filter(c => c !== placeholder);
+    const fromIdx = newPos.indexOf(dragFrom);
+    // rebuild order
+    const order = [];
+    let draggingIdx = -1;
+    Array.from(container.children).forEach((c, i) => {
+      if (c === placeholder) { draggingIdx = order.length; return; }
+      if (c === dragFrom) return;
+      const key = c.dataset.code || c.dataset.i;
+      if (key != null) order.push(key);
+    });
+    const dragKey = dragFrom.dataset.code || dragFrom.dataset.i;
+    if (draggingIdx < 0) draggingIdx = order.length;
+    order.splice(draggingIdx, 0, dragKey);
+    placeholder?.remove();
+    placeholder = null;
+    dragFrom.classList.remove('dragging');
+    dragFrom = null;
+    onMove(order);
+  }
+  container.addEventListener('pointerup', finish);
+  container.addEventListener('pointercancel', finish);
+}
 
-  const buildItem = (code, indexInFullList) => {
-    const l = langByCode[code];
-    if (!l) return null;
-    const el = document.createElement("div");
-    el.className = "lang-item" + (langOn[code] ? " on" : "");
-    el.draggable = true;
-    el.dataset.code = code;
-    el.dataset.idx = indexInFullList;
-    el.innerHTML =
-      '<span class="pos">' + (indexInFullList + 1) + '</span>' +
-      '<span class="flag">' + l.flag + '</span>' +
-      '<span class="nm">' + l.name + '</span>' +
-      '<span class="grip">☰</span>' +
-      '<span class="ck"></span>';
-    el.onclick = (e) => {
-      if (e.target.classList.contains("grip")) return;
-      langOn[code] = !langOn[code];
-      save("langOn", langOn);
-      renderLangs();
-      update();
-    };
-    el.ondragstart = e => {
-      e.dataTransfer.setData("text/plain", code);
-      el.classList.add("dragging");
-    };
-    el.ondragend = () => el.classList.remove("dragging");
-    el.ondragover = e => { e.preventDefault(); el.classList.add("drag-over"); };
-    el.ondragleave = () => el.classList.remove("drag-over");
-    el.ondrop = e => {
-      e.preventDefault();
-      el.classList.remove("drag-over");
-      const fromCode = e.dataTransfer.getData("text/plain");
-      const toCode = code;
-      if (!fromCode || fromCode === toCode) return;
-      const from = langOrder.indexOf(fromCode);
-      const to = langOrder.indexOf(toCode);
-      if (from < 0 || to < 0) return;
-      const [m] = langOrder.splice(from, 1);
-      langOrder.splice(to, 0, m);
-      save("langOrder", langOrder);
-      renderLangs();
-      update();
-    };
-    return el;
+// ==== LANGUES ====
+const langsTopBox = document.getElementById("langsTop");
+const langsOthersBox = document.getElementById("langsOthers");
+
+function buildLangEl(code, idx) {
+  const l = langByCode[code];
+  if (!l) return null;
+  const el = document.createElement("div");
+  el.className = "lang-item" + (langOn[code] ? " on" : "");
+  el.dataset.code = code;
+  el.innerHTML =
+    '<span class="pos">' + (idx + 1) + '</span>' +
+    '<span class="flag">' + l.flag + '</span>' +
+    '<span class="nm">' + l.name + '</span>' +
+    '<span class="grip">☰</span>' +
+    '<span class="ck"></span>';
+  el.onclick = (e) => {
+    if (e.target.classList.contains("grip")) return;
+    langOn[code] = !langOn[code];
+    save("langOn", langOn);
+    renderLangs();
+    update();
   };
+  return el;
+}
+
+function renderLangs() {
+  langsTopBox.innerHTML = "";
+  langsOthersBox.innerHTML = "";
 
   langOrder.slice(0, TOP_COUNT).forEach((code, i) => {
-    const el = buildItem(code, i);
-    if (el) top.appendChild(el);
+    const el = buildLangEl(code, i);
+    if (el) langsTopBox.appendChild(el);
   });
 
   const rest = langOrder.slice(TOP_COUNT);
   document.getElementById("toggleOthers").textContent = showOthers
     ? "▲ Masquer les autres langues (" + rest.length + ")"
     : "▼ Afficher les autres langues (" + rest.length + ")";
-  others.style.display = showOthers ? "" : "none";
+  langsOthersBox.style.display = showOthers ? "" : "none";
 
   rest.forEach((code, i) => {
-    const el = buildItem(code, TOP_COUNT + i);
-    if (el) others.appendChild(el);
+    const el = buildLangEl(code, TOP_COUNT + i);
+    if (el) langsOthersBox.appendChild(el);
   });
 }
+
+// setup drag for both lists — reorder langOrder globally
+function applyLangOrder(newKeysFromContainer, container, offset) {
+  // rebuild global langOrder from visible order
+  const topKeys = Array.from(langsTopBox.children).map(c => c.dataset.code);
+  const otherKeys = Array.from(langsOthersBox.children).map(c => c.dataset.code);
+  langOrder = [...topKeys, ...otherKeys];
+  save("langOrder", langOrder);
+  renderLangs();
+  update();
+}
+enableReorder(langsTopBox, [], (order) => applyLangOrder(order, langsTopBox, 0));
+enableReorder(langsOthersBox, [], (order) => applyLangOrder(order, langsOthersBox, TOP_COUNT));
 
 document.getElementById("toggleOthers").onclick = () => { showOthers = !showOthers; renderLangs(); };
 document.getElementById("langAll").onclick  = () => { Object.keys(langOn).forEach(k => langOn[k] = true);  save("langOn", langOn); renderLangs(); update(); };
 document.getElementById("langNone").onclick = () => { Object.keys(langOn).forEach(k => langOn[k] = false); save("langOn", langOn); renderLangs(); update(); };
 
+// ==== QUALITÉS ====
 const qualsBox = document.getElementById("quals");
 function renderQuals() {
   qualsBox.innerHTML = "";
@@ -1321,31 +1457,23 @@ function renderQuals() {
     if (!q) return;
     const el = document.createElement("div");
     el.className = "qual-item";
-    el.draggable = true;
     el.dataset.i = i;
-    el.dataset.k = k;
     el.innerHTML =
       '<span class="num">' + (i + 1) + '</span>' +
       '<span class="lbl">' + q.label + '</span>' +
       '<span class="grip">☰</span>';
-    el.ondragstart = e => { e.dataTransfer.setData("text/plain", i); el.classList.add("dragging"); };
-    el.ondragend = () => el.classList.remove("dragging");
-    el.ondragover = e => e.preventDefault();
-    el.ondrop = e => {
-      e.preventDefault();
-      const from = +e.dataTransfer.getData("text/plain");
-      const to = i;
-      if (from === to) return;
-      const [m] = qualArr.splice(from, 1);
-      qualArr.splice(to, 0, m);
-      save("quals", qualArr);
-      renderQuals();
-      update();
-    };
     qualsBox.appendChild(el);
   });
 }
+enableReorder(qualsBox, [], (order) => {
+  const newArr = Array.from(qualsBox.children).map(c => qualArr[+c.dataset.i]);
+  qualArr = newArr;
+  save("quals", qualArr);
+  renderQuals();
+  update();
+});
 
+// ==== TOGGLES ====
 function bindToggle(key, val, onSet) {
   document.querySelectorAll('[data-k="' + key + '"] button').forEach(b => {
     if (String(val) === b.dataset.v) b.classList.add("on");
@@ -1359,6 +1487,7 @@ function bindToggle(key, val, onSet) {
 }
 bindToggle("hdr", hdr, v => { hdr = v; save("hdr", hdr); });
 
+// ==== SLIDERS ====
 const sizeEl = document.getElementById("size"), sizeVal = document.getElementById("sizeVal");
 sizeEl.value = maxSize;
 const sizeText = v => v == 0 ? "Illimitée" : v + " Go max";
@@ -1370,6 +1499,7 @@ pctEl.value = minPct;
 pctVal.textContent = minPct + "%";
 pctEl.oninput = () => { minPct = +pctEl.value; pctVal.textContent = minPct + "%"; save("minPct", minPct); update(); };
 
+// ==== URL + COPY ====
 function buildCfg() {
   return {
     langs:  langOrder.filter(c => langOn[c]),
@@ -1389,7 +1519,7 @@ function update() {
 
   const nbL = cfg.langs.length, total = ALL_LANGS.length;
   document.getElementById("summary").textContent =
-    nbL + "/" + total + " langues · " + (hdr ? "HDR" : "SDR") + " · " + (maxSize ? maxSize + "Go" : "∞") + " · " + minPct + "%";
+    "v1.7.6 · " + nbL + "/" + total + " · " + (hdr ? "HDR" : "SDR") + " · " + (maxSize ? maxSize + "Go" : "∞") + " · " + minPct + "%";
 }
 
 let toastTimer;
