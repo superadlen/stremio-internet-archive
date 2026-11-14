@@ -106,9 +106,9 @@ const NOT_WEB_READY = new Set(["mkv", "avi", "ogv", "wmv", "flv", "mpg", "mpeg",
 
 const manifest = {
   id: "org.example.archivemoviesearch",
-  version: "1.7.2",
-  name: "Internet Archive DZ",
-  description: "Public domain and freely available movies and TV episodes from the Internet Archive",
+  version: "1.7.3",
+  name: "Archive-DZ",
+  description: "🎬 Films et séries en streaming depuis Internet Archive — Public domain & contenus libres, avec tri par langue, qualité et taille.",
   logo: "https://i.pinimg.com/1200x/fb/0d/cc/fb0dccec209770b71f8570c3bb8a38b7.jpg",
   resources: ["stream"],
   types: ["movie", "series"],
@@ -618,7 +618,7 @@ function cleanTitle(t, movieName) {
   return truncate(s || String(t || ""), 50);
 }
 
-// Build the multi-line stream title in the new "Archive-DZ" layout
+// Build the multi-line stream title in the "Archive-DZ" layout
 function buildStreamTitle({ doc, picked, ctx, pct }) {
   const { f, mins } = picked;
   const { name, series } = ctx;
@@ -631,7 +631,7 @@ function buildStreamTitle({ doc, picked, ctx, pct }) {
   // Line 2 : raw filename (dots/underscores kept)
   const fileName = f.name.split("/").pop();
 
-  // Line 3 : source + codec (no HDR here, matches requested layout)
+  // Line 3 : source + codec
   const qParts = [];
   if (q.source) qParts.push(q.source);
   if (q.codec) qParts.push("🎞️ " + q.codec);
@@ -649,7 +649,6 @@ function buildStreamTitle({ doc, picked, ctx, pct }) {
   // Line 6 : duration + %
   const durLine = mins ? `⏱️ ${fmtMins(mins)}${pct ? ` · ${pct}% match` : ""}` : "";
 
-  // Series: replace line 2 with SxxExx + ep title (still keeping raw filename below)
   const lines = [headerLine];
   if (series) {
     const label = `📺 S${pad2(series.season)}E${pad2(series.ep)}${series.epTitle ? " · " + truncate(series.epTitle, 40) : ""}`;
@@ -988,9 +987,11 @@ async function handleRequest(req, res) {
     padding:1rem 1.2rem;
     border-bottom:1px solid var(--line);
     background:#12151c;
+    flex-wrap:wrap;
   }
-  .modal header h1 { font-size:1.05rem; margin:0; flex:1; }
-  .modal header .ver { color:var(--dim); font-size:.75rem; }
+  .modal header h1 { font-size:1.05rem; margin:0; }
+  .modal header .desc { width:100%; font-size:.75rem; color:var(--dim); margin-top:.2rem; }
+  .modal header .ver { color:var(--dim); font-size:.75rem; margin-left:auto; }
   .modal header .badge { font-size:.65rem; padding:.15rem .5rem; border-radius:6px; background:#1c2a4a; color:var(--acc); }
   .tabs {
     display:flex;
@@ -1137,6 +1138,7 @@ async function handleRequest(req, res) {
     <h1>🏛 ${addonInterface.manifest.name}</h1>
     <span class="ver">v${addonInterface.manifest.version}</span>
     <span class="badge" id="summary"></span>
+    <div class="desc">${addonInterface.manifest.description}</div>
   </header>
 
   <nav class="tabs">
