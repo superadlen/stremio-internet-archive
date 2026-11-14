@@ -106,7 +106,7 @@ const NOT_WEB_READY = new Set(["mkv", "avi", "ogv", "wmv", "flv", "mpg", "mpeg",
 
 const manifest = {
   id: "org.example.archivemoviesearch",
-  version: "1.7.4",
+  version: "1.7.5",
   name: "Archive-DZ",
   description: "🎬 Films et séries en streaming depuis Internet Archive — Public domain & contenus libres, avec tri par langue, qualité et taille.",
   logo: "https://i.pinimg.com/1200x/fb/0d/cc/fb0dccec209770b71f8570c3bb8a38b7.jpg",
@@ -618,9 +618,8 @@ function cleanTitle(t, movieName) {
   return truncate(s || String(t || ""), 50);
 }
 
-// Build the multi-line stream title (WITHOUT duplicating the header line,
-// since Stremio already shows `stream.name` as the main header).
-function buildStreamTitle({ doc, picked, ctx, pct, url }) {
+// Build the multi-line stream title (WITHOUT duplicating the header line).
+function buildStreamTitle({ doc, picked, ctx, pct }) {
   const { f, mins } = picked;
   const { series } = ctx;
   const q = qualityInfo(f, doc);
@@ -646,9 +645,6 @@ function buildStreamTitle({ doc, picked, ctx, pct, url }) {
   // Line 5 : duration + %
   const durLine = mins ? `⏱️ ${fmtMins(mins)}${pct ? ` · ${pct}% match` : ""}` : "";
 
-  // Line 6 : link
-  const linkLine = url ? `🔗 ${url}` : "";
-
   const lines = [];
   if (series) {
     const label = `📺 S${pad2(series.season)}E${pad2(series.ep)}${series.epTitle ? " · " + truncate(series.epTitle, 40) : ""}`;
@@ -659,7 +655,6 @@ function buildStreamTitle({ doc, picked, ctx, pct, url }) {
   lines.push(langLine);
   if (sizeLine) lines.push(sizeLine);
   if (durLine) lines.push(durLine);
-  if (linkLine) lines.push(linkLine);
 
   return lines.join("\n");
 }
@@ -675,7 +670,7 @@ function formatStream({ doc, picked }, ctx) {
   const fileName = f.name.split("/").pop();
   const q = qualityInfo(f, doc);
 
-  const title = buildStreamTitle({ doc, picked, ctx, pct, url });
+  const title = buildStreamTitle({ doc, picked, ctx, pct });
 
   // internal metadata (non-Stremio) for user config filtering/sorting
   const qualKey =
