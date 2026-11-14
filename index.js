@@ -104,9 +104,12 @@ const BAD_WORDS = /\b(trailers?|teasers?|clips?|scenes?|behind the scenes|making
 const EXT_RANK = { mp4: 0, m4v: 1, webm: 2, mov: 3, mkv: 4, avi: 5, wmv: 6, ogv: 7 };
 const NOT_WEB_READY = new Set(["mkv", "avi", "ogv", "wmv", "flv", "mpg", "mpeg", "mov"]);
 
+// Les 4 types de HDR gérés individuellement
+const HDR_TYPES = ["HDR10", "HDR10+", "DV", "10bit"];
+
 const manifest = {
   id: "org.example.archivemoviesearch",
-  version: "1.7.7",
+  version: "1.7.8",
   name: "Archive-DZ",
   description: "🎬 Films et séries en streaming depuis Internet Archive — Public domain & contenus libres, avec tri par langue, qualité et taille.",
   logo: "https://i.pinimg.com/1200x/fb/0d/cc/fb0dccec209770b71f8570c3bb8a38b7.jpg",
@@ -586,12 +589,12 @@ function qualityInfo(f, doc) {
   else if (/\bav1\b/.test(text)) codec = "AV1";
   else if (/\bxvid\b/.test(text)) codec = "XviD";
 
-  // HDR / bit depth
+  // HDR / bit depth — 4 types détectés séparément
   const hdr = [];
   if (/\bdolby vision\b|\b(?:dovi|dv)\b/.test(text)) hdr.push("DV");
   if (/\bhdr10\+\b/.test(text)) hdr.push("HDR10+");
   else if (/\bhdr10\b/.test(text)) hdr.push("HDR10");
-  else if (/\bhdr\b/.test(text)) hdr.push("HDR");
+  else if (/\bhdr\b/.test(text)) hdr.push("HDR10");
   if (/\b(10 ?bit|hi ?10p?)\b/.test(text)) hdr.push("10bit");
 
   // audio
@@ -765,19 +768,19 @@ async function findStreams(meta, series, imdbId) {
   return out;
 }
 
-// ---------- user config (qualités / langues / hdr / taille / min%) ----------
+// ---------- user config (qualités / langues / HDR / taille / min%) ----------
 function applyUserCfg(streams, cfg) {
   if (!cfg) return streams;
 
   // 1) QUALITÉS : ne garder que celles cochées
-  // cfg.quals = liste ordonnée des qualités ACTIVES.
-  // Si vide → on ne filtre pas (tout est autorisé).
-  if (Array.isArray(cfg.quals) && cfg.quals.length) {
-    const active = new Set(cfg.quals);
-    streams = streams.filter((s) => active.has(s._qual) || s._qual === "unk" && active.has("unk"));
-  } else if (Array.isArray(cfg.quals)) {
-    // aucun qualité active = tout masquer
-    streams = [];
+  if (Array.isArray(cfg.quals)) {
+    if (!cfg.quals.length) {
+      // aucun qualité active = tout masquer
+      streams = [];
+    } else {
+      const active = new Set(cfg.quals);
+      streams = streams.filter((s) => active.has(s._qual));
+    }
   }
 
   // 2) langues masquées
@@ -795,8 +798,22 @@ function applyUserCfg(streams, cfg) {
     streams = streams.filter((s) => !s._size || s._size <= maxBytes);
   }
 
-  // 4) HDR refusé
-  if (Number(cfg.hdr) === 0) {
+  // 4) HDR : filtrage individuel par type
+  //    cfg.hdr peut être :
+  //      - un tableau de types HDR actifs (nouveau format)
+  //      - 1 / 0 (ancien format, rétro-compat)
+  //    Un flux est accepté si :
+  //      - il n'a pas de HDR, OU
+  //      - au moins un de ses HDR fait partie des types actifs
+  if (Array.isArray(cfg.hdr)) {
+    const allowedHdr = new Set(cfg.hdr);
+    streams = streams.filter((s) => {
+      const sh = s._hdr || [];
+      if (!sh.length) return true;               // pas de HDR : OK
+      return sh.some((h) => allowedHdr.has(h));  // au moins un HDR accepté
+    });
+  } else if (Number(cfg.hdr) === 0) {
+    // ancien format : tout refuser
     streams = streams.filter((s) => !(s._hdr && s._hdr.length));
   }
 
@@ -905,7 +922,6 @@ async function handleRequest(req, res) {
     return res.end();
   }
 
-  // URL avec config : /<base64>/manifest.json  et  /<base64>/stream/...
   const cfgMatch = pathname.match(/^\/([A-Za-z0-9+/=_-]+)\/(manifest\.json|stream\/.*)$/);
   let userCfg = null;
   if (cfgMatch) {
@@ -931,7 +947,6 @@ async function handleRequest(req, res) {
     const type = streamMatch[1];
     const id = decodeURIComponent(streamMatch[2]);
 
-    // si une config est fournie, on court-circuite le cache "brut" et on applique le filtre
     if (userCfg) {
       try {
         const streams = await searchAndStore(type, id, false, userCfg);
@@ -983,42 +998,30 @@ async function handleRequest(req, res) {
     min-height:100dvh;
   }
   .modal {
-    width:100%;
-    max-width:567px;              /* ≈ 15 cm */
+    width:100%; max-width:567px;
     background:var(--card);
-    border-left:1px solid var(--line);
-    border-right:1px solid var(--line);
+    border-left:1px solid var(--line); border-right:1px solid var(--line);
     display:flex; flex-direction:column;
-    min-height:100dvh;
-    overflow:hidden;
-    margin:0 auto;
+    min-height:100dvh; overflow:hidden; margin:0 auto;
   }
   @media (min-width:960px) {
     body { padding:1rem; align-items:center; }
     .modal {
-      min-height:auto;
-      max-height:calc(100vh - 2rem);
-      border:1px solid var(--line);
-      border-radius:18px;
+      min-height:auto; max-height:calc(100vh - 2rem);
+      border:1px solid var(--line); border-radius:18px;
       box-shadow:0 20px 60px rgba(0,0,0,.6);
     }
   }
 
   .modal header {
-    display:grid;
-    grid-template-columns:auto 1fr auto;
-    align-items:center;
-    gap:.6rem;
-    padding:.7rem .8rem;
-    border-bottom:1px solid var(--line);
-    background:#12151c;
-    position:sticky; top:0; z-index:5;
+    display:grid; grid-template-columns:auto 1fr auto; align-items:center; gap:.6rem;
+    padding:.7rem .8rem; border-bottom:1px solid var(--line);
+    background:#12151c; position:sticky; top:0; z-index:5;
   }
   .logo {
     width:40px; height:40px; border-radius:10px;
     object-fit:cover; background:#0b0d12;
-    border:1px solid var(--line);
-    flex:none;
+    border:1px solid var(--line); flex:none;
   }
   .title-block { min-width:0; }
   .title-block h1 { font-size:.95rem; margin:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -1027,26 +1030,16 @@ async function handleRequest(req, res) {
   .badge { font-size:.62rem; padding:.2rem .5rem; border-radius:6px; background:#1c2a4a; color:var(--acc); white-space:nowrap; }
 
   .tabs {
-    display:flex;
-    border-bottom:1px solid var(--line);
-    background:#12151c;
-    padding:0 .4rem;
-    gap:.2rem;
-    overflow-x:auto;
-    scrollbar-width:none;
-    -webkit-overflow-scrolling:touch;
-    position:sticky; top:57px; z-index:4;
+    display:flex; border-bottom:1px solid var(--line); background:#12151c;
+    padding:0 .4rem; gap:.2rem; overflow-x:auto; scrollbar-width:none;
+    -webkit-overflow-scrolling:touch; position:sticky; top:57px; z-index:4;
   }
   .tabs::-webkit-scrollbar { display:none; }
   .tabs button {
     background:transparent; border:none; color:var(--dim);
-    padding:.8rem .9rem;
-    font-size:.83rem; font-weight:600;
-    cursor:pointer;
-    border-bottom:2px solid transparent;
-    display:flex; align-items:center; gap:.4rem;
-    white-space:nowrap;
-    min-height:44px;
+    padding:.8rem .9rem; font-size:.83rem; font-weight:600; cursor:pointer;
+    border-bottom:2px solid transparent; display:flex; align-items:center; gap:.4rem;
+    white-space:nowrap; min-height:44px;
     transition:color .15s, border-color .15s;
   }
   .tabs button:hover { color:var(--txt); }
@@ -1055,8 +1048,7 @@ async function handleRequest(req, res) {
   .content {
     flex:1; overflow-y:auto;
     padding:.85rem .8rem calc(.85rem + var(--safe-b));
-    min-height:280px;
-    -webkit-overflow-scrolling:touch;
+    min-height:280px; -webkit-overflow-scrolling:touch;
   }
   .content::-webkit-scrollbar { width:6px; }
   .content::-webkit-scrollbar-thumb { background:var(--line); border-radius:6px; }
@@ -1079,7 +1071,7 @@ async function handleRequest(req, res) {
   .hint { font-size:.72rem; color:var(--dim); margin:.3rem 0 .8rem; line-height:1.4; }
 
   .lang-list, .qual-list { display:flex; flex-direction:column; gap:.35rem; }
-  .lang-item, .qual-item {
+  .lang-item, .qual-item, .hdr-item {
     display:flex; align-items:center; gap:.55rem;
     padding:.6rem .65rem;
     background:#1e2230;
@@ -1090,13 +1082,12 @@ async function handleRequest(req, res) {
     min-height:48px;
     transition:background .1s, border-color .1s, transform .1s, opacity .15s;
   }
-  .lang-item:hover, .qual-item:hover { border-color:#3a4254; }
-  .lang-item.on, .qual-item.on { background:#1c2a4a; border-color:#2f4780; }
-  .lang-item.off, .qual-item.off { opacity:.5; }
+  .lang-item:hover, .qual-item:hover, .hdr-item:hover { border-color:#3a4254; }
+  .lang-item.on, .qual-item.on, .hdr-item.on { background:#1c2a4a; border-color:#2f4780; }
+  .lang-item.off, .qual-item.off, .hdr-item.off { opacity:.5; }
   .lang-item.dragging, .qual-item.dragging { opacity:.5; transform:scale(.98); }
-  .lang-item.drag-over, .qual-item.drag-over { border-color:var(--acc); background:#243358; }
   .lang-item .flag { font-size:1.2rem; flex:none; }
-  .lang-item .nm, .qual-item .lbl { flex:1; font-size:.86rem; }
+  .lang-item .nm, .qual-item .lbl, .hdr-item .lbl { flex:1; font-size:.86rem; }
   .lang-item .pos, .qual-item .num {
     color:var(--dim); font-size:.68rem; font-variant-numeric:tabular-nums;
     min-width:24px; text-align:center;
@@ -1104,14 +1095,14 @@ async function handleRequest(req, res) {
     font-weight:700;
   }
   .qual-item .num { background:var(--acc); color:#fff; border-radius:50%; min-width:22px; height:22px; padding:0; line-height:22px; }
-  .lang-item .ck, .qual-item .ck {
+  .lang-item .ck, .qual-item .ck, .hdr-item .ck {
     width:20px; height:20px; border-radius:50%;
     border:2px solid var(--line); flex:none;
     display:grid; place-items:center;
     transition:all .12s;
   }
-  .lang-item.on .ck, .qual-item.on .ck { border-color:var(--ok); background:var(--ok); }
-  .lang-item.on .ck::after, .qual-item.on .ck::after { content:"✓"; color:#04120a; font-size:.72rem; font-weight:900; }
+  .lang-item.on .ck, .qual-item.on .ck, .hdr-item.on .ck { border-color:var(--ok); background:var(--ok); }
+  .lang-item.on .ck::after, .qual-item.on .ck::after, .hdr-item.on .ck::after { content:"✓"; color:#04120a; font-size:.72rem; font-weight:900; }
   .lang-item .grip, .qual-item .grip { color:var(--dim); font-size:1rem; cursor:grab; padding:0 .15rem; }
 
   .btn-more {
@@ -1131,15 +1122,6 @@ async function handleRequest(req, res) {
   .opt-row:last-of-type { border-bottom:none; }
   .opt-row label { font-size:.84rem; flex:1; line-height:1.35; }
   .opt-row small { display:block; color:var(--dim); font-size:.7rem; margin-top:.22rem; font-weight:400; }
-  .toggle { display:flex; gap:.25rem; }
-  .toggle button {
-    border:1px solid var(--line); background:transparent;
-    color:var(--dim); border-radius:8px;
-    padding:.5rem .75rem; font-size:.8rem; cursor:pointer;
-    min-width:56px; min-height:38px;
-    font-weight:600;
-  }
-  .toggle button.on { background:var(--acc); border-color:var(--acc); color:#fff; }
   input[type=range] { width:100%; accent-color:var(--acc); margin-top:.45rem; height:30px; }
   .slider-val { color:var(--acc); font-weight:700; font-size:.8rem; }
   .slider-hint { display:flex; justify-content:space-between; font-size:.68rem; color:var(--dim); margin-top:.15rem; }
@@ -1165,9 +1147,7 @@ async function handleRequest(req, res) {
     padding:.7rem .9rem; font-size:.85rem; font-weight:700;
     cursor:pointer; text-decoration:none;
     display:inline-flex; align-items:center; justify-content:center; gap:.4rem;
-    white-space:nowrap;
-    min-height:46px;
-    flex:1;
+    white-space:nowrap; min-height:46px; flex:1;
   }
   .btn.install { background:var(--ok); color:#04120a; }
   .btn.copy    { background:var(--acc); color:#fff; }
@@ -1239,10 +1219,22 @@ async function handleRequest(req, res) {
 
     <section class="section" id="tab-opts">
       <h2>⚙️ Options</h2>
-      <div class="opt-row">
-        <label>📺 HDR / Dolby Vision<small>HDR10, HDR10+, DV, 10bit</small></label>
-        <div class="toggle" data-k="hdr"><button data-v="1">Oui</button><button data-v="0">Non</button></div>
+
+      <!-- HDR : options individuelles -->
+      <div style="margin-bottom:.8rem;">
+        <div style="font-size:.84rem; margin-bottom:.5rem;">
+          📺 HDR / Dolby Vision
+          <span style="display:flex; gap:.3rem; float:right;">
+            <button class="mini-btn" id="hdrAll" style="font-size:.68rem; padding:.35rem .55rem; border:1px solid var(--line); background:transparent; color:var(--dim); border-radius:6px; cursor:pointer;">Tout</button>
+            <button class="mini-btn" id="hdrNone" style="font-size:.68rem; padding:.35rem .55rem; border:1px solid var(--line); background:transparent; color:var(--dim); border-radius:6px; cursor:pointer;">Rien</button>
+          </span>
+        </div>
+        <small style="display:block; color:var(--dim); font-size:.7rem; margin-bottom:.5rem;">
+          Activez les formats HDR que vous voulez autoriser. Les vidéos sans HDR sont toujours autorisées.
+        </small>
+        <div id="hdrs" class="qual-list"></div>
       </div>
+
       <div class="opt-row" style="flex-direction:column;align-items:stretch;">
         <label>📦 Taille maximale <span class="slider-val" id="sizeVal">Illimitée</span><small>Filtre les fichiers trop gros</small></label>
         <input type="range" id="size" min="0" max="20" step="0.5" value="0">
@@ -1294,6 +1286,12 @@ const QUALS = [
   { k:"low",  label:"📺 360p et moins" },
   { k:"unk",  label:"❓ Inconnue" },
 ];
+const HDRS = [
+  { k:"HDR10",  label:"HDR10" },
+  { k:"HDR10+", label:"HDR10+" },
+  { k:"DV",     label:"Dolby Vision" },
+  { k:"10bit",  label:"10-bit" },
+];
 
 function load(k, def) { try { const v = JSON.parse(localStorage.getItem("ia_cfg_"+k)); return v ?? def; } catch(e){ return def; } }
 function save(k, v) { localStorage.setItem("ia_cfg_"+k, JSON.stringify(v)); }
@@ -1302,13 +1300,14 @@ let langOrder  = load("langOrder",  ALL_LANGS.map(l => l.code));
 let langOn     = load("langOn",     Object.fromEntries(ALL_LANGS.map(l => [l.code, true])));
 let qualOrder  = load("qualOrder",  QUALS.map(q => q.k));
 let qualOn     = load("qualOn",     Object.fromEntries(QUALS.map(q => [q.k, true])));
-let hdr        = load("hdr",        1);
+let hdrOn      = load("hdrOn",      Object.fromEntries(HDRS.map(h => [h.k, true])));
 let maxSize    = load("size",       0);
 let minPct     = load("minPct",     50);
 let showOthers = false;
 
 const langByCode = Object.fromEntries(ALL_LANGS.map(l => [l.code, l]));
 const qualByKey = Object.fromEntries(QUALS.map(q => [q.k, q]));
+const hdrByKey  = Object.fromEntries(HDRS.map(h => [h.k, h]));
 
 document.querySelectorAll('.tabs button').forEach(b => {
   b.onclick = () => {
@@ -1318,7 +1317,6 @@ document.querySelectorAll('.tabs button').forEach(b => {
   };
 });
 
-// ==== DRAG & DROP TACTILE ====
 function enableReorder(container, onMove) {
   let dragFrom = null, placeholder = null;
   function getEl(e) { return e.target.closest('[data-code],[data-i]'); }
@@ -1394,12 +1392,8 @@ function renderQuals() {
   });
 }
 enableReorder(qualsBox, (order) => {
-  qualOrder = order;
-  save("qualOrder", qualOrder);
-  renderQuals();
-  update();
+  qualOrder = order; save("qualOrder", qualOrder); renderQuals(); update();
 });
-
 document.getElementById("qualAll").onclick  = () => { Object.keys(qualOn).forEach(k => qualOn[k] = true);  save("qualOn", qualOn); renderQuals(); update(); };
 document.getElementById("qualNone").onclick = () => { Object.keys(qualOn).forEach(k => qualOn[k] = false); save("qualOn", qualOn); renderQuals(); update(); };
 
@@ -1432,52 +1426,55 @@ function buildLangEl(code, idx) {
 function renderLangs() {
   langsTopBox.innerHTML = "";
   langsOthersBox.innerHTML = "";
-
   langOrder.slice(0, TOP_COUNT).forEach((code, i) => {
     const el = buildLangEl(code, i);
     if (el) langsTopBox.appendChild(el);
   });
-
   const rest = langOrder.slice(TOP_COUNT);
   document.getElementById("toggleOthers").textContent = showOthers
     ? "▲ Masquer les autres langues (" + rest.length + ")"
     : "▼ Afficher les autres langues (" + rest.length + ")";
   langsOthersBox.style.display = showOthers ? "" : "none";
-
   rest.forEach((code, i) => {
     const el = buildLangEl(code, TOP_COUNT + i);
     if (el) langsOthersBox.appendChild(el);
   });
 }
-
 function applyLangOrder() {
   const topKeys = Array.from(langsTopBox.children).map(c => c.dataset.code).filter(Boolean);
   const otherKeys = Array.from(langsOthersBox.children).map(c => c.dataset.code).filter(Boolean);
   langOrder = [...topKeys, ...otherKeys];
   save("langOrder", langOrder);
-  renderLangs();
-  update();
+  renderLangs(); update();
 }
 enableReorder(langsTopBox, applyLangOrder);
 enableReorder(langsOthersBox, applyLangOrder);
-
 document.getElementById("toggleOthers").onclick = () => { showOthers = !showOthers; renderLangs(); };
 document.getElementById("langAll").onclick  = () => { Object.keys(langOn).forEach(k => langOn[k] = true);  save("langOn", langOn); renderLangs(); update(); };
 document.getElementById("langNone").onclick = () => { Object.keys(langOn).forEach(k => langOn[k] = false); save("langOn", langOn); renderLangs(); update(); };
 
-// ==== TOGGLES ====
-function bindToggle(key, val, onSet) {
-  document.querySelectorAll('[data-k="' + key + '"] button').forEach(b => {
-    if (String(val) === b.dataset.v) b.classList.add("on");
-    b.onclick = () => {
-      const v = +b.dataset.v;
-      onSet(v);
-      document.querySelectorAll('[data-k="' + key + '"] button').forEach(x => x.classList.toggle("on", x === b));
+// ==== HDR individuel ====
+const hdrsBox = document.getElementById("hdrs");
+function renderHdrs() {
+  hdrsBox.innerHTML = "";
+  HDRS.forEach((h) => {
+    const el = document.createElement("div");
+    el.className = "hdr-item" + (hdrOn[h.k] ? " on" : " off");
+    el.dataset.k = h.k;
+    el.innerHTML =
+      '<span class="lbl">' + h.label + '</span>' +
+      '<span class="ck"></span>';
+    el.onclick = () => {
+      hdrOn[h.k] = !hdrOn[h.k];
+      save("hdrOn", hdrOn);
+      renderHdrs();
       update();
     };
+    hdrsBox.appendChild(el);
   });
 }
-bindToggle("hdr", hdr, v => { hdr = v; save("hdr", hdr); });
+document.getElementById("hdrAll").onclick  = () => { Object.keys(hdrOn).forEach(k => hdrOn[k] = true);  save("hdrOn", hdrOn); renderHdrs(); update(); };
+document.getElementById("hdrNone").onclick = () => { Object.keys(hdrOn).forEach(k => hdrOn[k] = false); save("hdrOn", hdrOn); renderHdrs(); update(); };
 
 // ==== SLIDERS ====
 const sizeEl = document.getElementById("size"), sizeVal = document.getElementById("sizeVal");
@@ -1494,10 +1491,9 @@ pctEl.oninput = () => { minPct = +pctEl.value; pctVal.textContent = minPct + "%"
 // ==== URL + COPY ====
 function buildCfg() {
   return {
-    // ordre + uniquement qualités actives
     quals:  qualOrder.filter(k => qualOn[k]),
     langs:  langOrder.filter(c => langOn[c]),
-    hdr,
+    hdr:    HDRS.map(h => h.k).filter(k => hdrOn[k]),  // tableau des HDR actifs
     size:   maxSize,
     minPct,
   };
@@ -1510,11 +1506,12 @@ function update() {
   document.getElementById("url").textContent = url;
   document.getElementById("install").href = "stremio://" + url.replace(/^https?:\\/\\//, "");
 
-  const nbQ = cfg.quals.length;
-  const nbL = cfg.langs.length;
+  const nbQ  = cfg.quals.length;
+  const nbL  = cfg.langs.length;
+  const nbH  = cfg.hdr.length;
   document.getElementById("summary").textContent =
-    "v1.7.7 · " + nbQ + "/" + QUALS.length + " Q · " + nbL + "/" + ALL_LANGS.length + " L · " +
-    (hdr ? "HDR" : "SDR") + " · " + (maxSize ? maxSize + "Go" : "∞") + " · " + minPct + "%";
+    "v1.7.8 · " + nbQ + "/" + QUALS.length + " Q · " + nbL + "/" + ALL_LANGS.length + " L · " +
+    nbH + "/" + HDRS.length + " H · " + (maxSize ? maxSize + "Go" : "∞") + " · " + minPct + "%";
 }
 
 let toastTimer;
@@ -1534,6 +1531,7 @@ document.getElementById("copy").onclick = async () => {
 
 renderQuals();
 renderLangs();
+renderHdrs();
 update();
 </script>
 </body></html>`);
