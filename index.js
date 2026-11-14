@@ -106,7 +106,7 @@ const NOT_WEB_READY = new Set(["mkv", "avi", "ogv", "wmv", "flv", "mpg", "mpeg",
 
 const manifest = {
   id: "org.example.archivemoviesearch",
-  version: "1.7.3",
+  version: "1.7.4",
   name: "Archive-DZ",
   description: "🎬 Films et séries en streaming depuis Internet Archive — Public domain & contenus libres, avec tri par langue, qualité et taille.",
   logo: "https://i.pinimg.com/1200x/fb/0d/cc/fb0dccec209770b71f8570c3bb8a38b7.jpg",
@@ -618,49 +618,48 @@ function cleanTitle(t, movieName) {
   return truncate(s || String(t || ""), 50);
 }
 
-// Build the multi-line stream title in the "Archive-DZ" layout
-function buildStreamTitle({ doc, picked, ctx, pct }) {
+// Build the multi-line stream title (WITHOUT duplicating the header line,
+// since Stremio already shows `stream.name` as the main header).
+function buildStreamTitle({ doc, picked, ctx, pct, url }) {
   const { f, mins } = picked;
-  const { name, series } = ctx;
+  const { series } = ctx;
   const q = qualityInfo(f, doc);
 
-  // Line 1 : addon name + quality
-  const resTag = q.res ? (q.res === "4K" ? "4K UHD" : q.res) : "Unknown";
-  const headerLine = `🏛 Archive-DZ | 🔥 ${resTag}`;
-
-  // Line 2 : raw filename (dots/underscores kept)
+  // Line 1 : raw filename
   const fileName = f.name.split("/").pop();
 
-  // Line 3 : source + codec
+  // Line 2 : source + codec
   const qParts = [];
   if (q.source) qParts.push(q.source);
   if (q.codec) qParts.push("🎞️ " + q.codec);
   else if (q.source) qParts.push("🎞️ —");
   const qLine = qParts.join(" ");
 
-  // Line 4 : languages
+  // Line 3 : languages
   const langText = languageLabel(doc, f);
   const langParts = langText.split(" · ").map((l) => LANG_FLAGS[l] || l);
   const langLine = `🗣️ ${langParts.join(" / ") || "Language not listed"}`;
 
-  // Line 5 : size
+  // Line 4 : size
   const sizeLine = f.size ? `📦 ${fmtSize(f.size)}` : "";
 
-  // Line 6 : duration + %
+  // Line 5 : duration + %
   const durLine = mins ? `⏱️ ${fmtMins(mins)}${pct ? ` · ${pct}% match` : ""}` : "";
 
-  const lines = [headerLine];
+  // Line 6 : link
+  const linkLine = url ? `🔗 ${url}` : "";
+
+  const lines = [];
   if (series) {
     const label = `📺 S${pad2(series.season)}E${pad2(series.ep)}${series.epTitle ? " · " + truncate(series.epTitle, 40) : ""}`;
     lines.push(label);
-    lines.push(fileName);
-  } else {
-    lines.push(fileName);
   }
+  lines.push(fileName);
   if (qLine) lines.push(qLine);
   lines.push(langLine);
   if (sizeLine) lines.push(sizeLine);
   if (durLine) lines.push(durLine);
+  if (linkLine) lines.push(linkLine);
 
   return lines.join("\n");
 }
@@ -676,7 +675,7 @@ function formatStream({ doc, picked }, ctx) {
   const fileName = f.name.split("/").pop();
   const q = qualityInfo(f, doc);
 
-  const title = buildStreamTitle({ doc, picked, ctx, pct });
+  const title = buildStreamTitle({ doc, picked, ctx, pct, url });
 
   // internal metadata (non-Stremio) for user config filtering/sorting
   const qualKey =
