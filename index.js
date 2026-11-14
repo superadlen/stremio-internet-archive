@@ -106,7 +106,7 @@ const NOT_WEB_READY = new Set(["mkv", "avi", "ogv", "wmv", "flv", "mpg", "mpeg",
 
 const manifest = {
   id: "org.example.archivemoviesearch",
-  version: "1.7.1",
+  version: "1.7.2",
   name: "Internet Archive DZ",
   description: "Public domain and freely available movies and TV episodes from the Internet Archive",
   logo: "https://i.pinimg.com/1200x/fb/0d/cc/fb0dccec209770b71f8570c3bb8a38b7.jpg",
@@ -618,68 +618,50 @@ function cleanTitle(t, movieName) {
   return truncate(s || String(t || ""), 50);
 }
 
-// Convert quality info into a single line like "BluRay 📺 HDR | DV | 10bit 🎞️ HEVC"
-function qualityLine(q) {
-  const parts = [];
-  if (q.source) parts.push(q.source);
-  if (q.hdr.length) parts.push("📺 " + q.hdr.join(" | "));
-  if (q.codec) parts.push("🎞️ " + q.codec);
-  return parts.join(" ");
-}
-
-// Line for audio track info like "🎧 Atmos | TrueHD | DD+ 📡 5.1"
-function audioLine(q) {
-  const parts = [];
-  if (q.audio.length) parts.push("🎧 " + q.audio.join(" | "));
-  return parts.join(" ");
-}
-
-// Build the multi-line stream title matching the requested style
+// Build the multi-line stream title in the new "Archive-DZ" layout
 function buildStreamTitle({ doc, picked, ctx, pct }) {
-  const { f, ext, mins } = picked;
-  const { year, name, series } = ctx;
-  const itemYear = doc.year ? String(doc.year).slice(0, 4) : "";
-  const fileName = f.name.split("/").pop();
+  const { f, mins } = picked;
+  const { name, series } = ctx;
   const q = qualityInfo(f, doc);
 
-  // resolution header line
-  const resLine = q.res
-    ? `${q.res === "4K" ? "🔥 4K UHD" : `🔥 ${q.res}`}`
-    : "🎬 Unknown Quality";
+  // Line 1 : addon name + quality
+  const resTag = q.res ? (q.res === "4K" ? "4K UHD" : q.res) : "Unknown";
+  const headerLine = `🏛 Archive-DZ | 🔥 ${resTag}`;
 
-  // title line
-  const displayName = series ? `${name}` : cleanTitle(doc.title || doc.identifier, name);
-  const titleLine = `🎬 ${displayName}${itemYear ? ` (${itemYear})` : ""}`;
+  // Line 2 : raw filename (dots/underscores kept)
+  const fileName = f.name.split("/").pop();
 
-  // quality line
-  const qLine = qualityLine(q);
+  // Line 3 : source + codec (no HDR here, matches requested layout)
+  const qParts = [];
+  if (q.source) qParts.push(q.source);
+  if (q.codec) qParts.push("🎞️ " + q.codec);
+  else if (q.source) qParts.push("🎞️ —");
+  const qLine = qParts.join(" ");
 
-  // audio line
-  const aLine = audioLine(q);
-
-  // languages line
+  // Line 4 : languages
   const langText = languageLabel(doc, f);
   const langParts = langText.split(" · ").map((l) => LANG_FLAGS[l] || l);
-  const langLine = langParts.length ? `🗣️ ${langParts.join(" / ")}` : "";
+  const langLine = `🗣️ ${langParts.join(" / ") || "Language not listed"}`;
 
-  // size line
+  // Line 5 : size
   const sizeLine = f.size ? `📦 ${fmtSize(f.size)}` : "";
 
-  // source link line
-  const linkLine = `💻 Web Link 🔍 DZ`;
+  // Line 6 : duration + %
+  const durLine = mins ? `⏱️ ${fmtMins(mins)}${pct ? ` · ${pct}% match` : ""}` : "";
 
-  // Assemble lines, skipping empty
-  const lines = [resLine, titleLine];
+  // Series: replace line 2 with SxxExx + ep title (still keeping raw filename below)
+  const lines = [headerLine];
   if (series) {
-    const label = `S${pad2(series.season)}E${pad2(series.ep)}`;
-    lines.push(`📺 ${label}${series.epTitle ? " · " + truncate(series.epTitle, 40) : ""}`);
+    const label = `📺 S${pad2(series.season)}E${pad2(series.ep)}${series.epTitle ? " · " + truncate(series.epTitle, 40) : ""}`;
+    lines.push(label);
+    lines.push(fileName);
+  } else {
+    lines.push(fileName);
   }
   if (qLine) lines.push(qLine);
-  if (aLine) lines.push(aLine);
-  if (langLine) lines.push(langLine);
+  lines.push(langLine);
   if (sizeLine) lines.push(sizeLine);
-  if (mins) lines.push(`⏱️ ${fmtMins(mins)}${pct ? ` · ${pct}% match` : ""}`);
-  lines.push(linkLine);
+  if (durLine) lines.push(durLine);
 
   return lines.join("\n");
 }
@@ -705,12 +687,14 @@ function formatStream({ doc, picked }, ctx) {
     (q.res === "480p" || q.res === "576p") ? "480" :
     q.rank === 1 ? "low" : "unk";
 
+  const resTag = q.res ? (q.res === "4K" ? "4K UHD" : q.res) : "Unknown";
+
   return {
     pct,
     rank: q.rank,
     stream: {
       url,
-      name: `🏛 Archive\n〈${series ? "Episode" : "Full Movie"}〉`,
+      name: `🏛 Archive-DZ | 🔥 ${resTag}`,
       title,
       behaviorHints: {
         notWebReady: SHOW_NOT_WEB_READY ? false : NOT_WEB_READY.has(ext),
