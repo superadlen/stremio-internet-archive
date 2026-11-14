@@ -106,7 +106,7 @@ const NOT_WEB_READY = new Set(["mkv", "avi", "ogv", "wmv", "flv", "mpg", "mpeg",
 
 const manifest = {
   id: "org.example.archivemoviesearch",
-  version: "1.7.6",
+  version: "1.7.7",
   name: "Archive-DZ",
   description: "🎬 Films et séries en streaming depuis Internet Archive — Public domain & contenus libres, avec tri par langue, qualité et taille.",
   logo: "https://i.pinimg.com/1200x/fb/0d/cc/fb0dccec209770b71f8570c3bb8a38b7.jpg",
@@ -765,11 +765,22 @@ async function findStreams(meta, series, imdbId) {
   return out;
 }
 
-// ---------- user config (langues / qualité / hdr / taille / min%) ----------
+// ---------- user config (qualités / langues / hdr / taille / min%) ----------
 function applyUserCfg(streams, cfg) {
   if (!cfg) return streams;
 
-  // 1) langues masquées
+  // 1) QUALITÉS : ne garder que celles cochées
+  // cfg.quals = liste ordonnée des qualités ACTIVES.
+  // Si vide → on ne filtre pas (tout est autorisé).
+  if (Array.isArray(cfg.quals) && cfg.quals.length) {
+    const active = new Set(cfg.quals);
+    streams = streams.filter((s) => active.has(s._qual) || s._qual === "unk" && active.has("unk"));
+  } else if (Array.isArray(cfg.quals)) {
+    // aucun qualité active = tout masquer
+    streams = [];
+  }
+
+  // 2) langues masquées
   const allowed = new Set((cfg.langs || []).map((l) => String(l).toLowerCase().slice(0, 2)));
   if (allowed.size) {
     streams = streams.filter((s) => {
@@ -778,23 +789,23 @@ function applyUserCfg(streams, cfg) {
     });
   }
 
-  // 2) taille max (Go)
+  // 3) taille max (Go)
   if (cfg.size) {
     const maxBytes = Number(cfg.size) * 1e9;
     streams = streams.filter((s) => !s._size || s._size <= maxBytes);
   }
 
-  // 3) HDR refusé
+  // 4) HDR refusé
   if (Number(cfg.hdr) === 0) {
     streams = streams.filter((s) => !(s._hdr && s._hdr.length));
   }
 
-  // 4) filtre % de correspondance minimum
+  // 5) filtre % de correspondance minimum
   if (cfg.minPct != null) {
     streams = streams.filter((s) => !s._pct || s._pct >= cfg.minPct);
   }
 
-  // 5) tri par ordre de qualité choisi
+  // 6) tri par ordre de qualité choisi
   const order = new Map((cfg.quals || []).map((k, i) => [k, i]));
   const rankOf = (s) => (order.has(s._qual) ? order.get(s._qual) : 99);
   streams = streams.slice().sort((a, b) => rankOf(a) - rankOf(b));
@@ -971,7 +982,6 @@ async function handleRequest(req, res) {
     padding:0;
     min-height:100dvh;
   }
-  /* ==== Fenêtre : ~15 cm de large (≈567px) centrée ==== */
   .modal {
     width:100%;
     max-width:567px;              /* ≈ 15 cm */
@@ -994,7 +1004,6 @@ async function handleRequest(req, res) {
     }
   }
 
-  /* ==== HEADER avec logo ==== */
   .modal header {
     display:grid;
     grid-template-columns:auto 1fr auto;
@@ -1017,7 +1026,6 @@ async function handleRequest(req, res) {
     display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
   .badge { font-size:.62rem; padding:.2rem .5rem; border-radius:6px; background:#1c2a4a; color:var(--acc); white-space:nowrap; }
 
-  /* ==== TABS ==== */
   .tabs {
     display:flex;
     border-bottom:1px solid var(--line);
@@ -1044,7 +1052,6 @@ async function handleRequest(req, res) {
   .tabs button:hover { color:var(--txt); }
   .tabs button.active { color:var(--acc); border-bottom-color:var(--acc); }
 
-  /* ==== CONTENU ==== */
   .content {
     flex:1; overflow-y:auto;
     padding:.85rem .8rem calc(.85rem + var(--safe-b));
@@ -1071,9 +1078,8 @@ async function handleRequest(req, res) {
   .section h2 button:hover { color:var(--txt); border-color:var(--acc); }
   .hint { font-size:.72rem; color:var(--dim); margin:.3rem 0 .8rem; line-height:1.4; }
 
-  /* ==== LANGUES ==== */
-  .lang-list { display:flex; flex-direction:column; gap:.35rem; }
-  .lang-item {
+  .lang-list, .qual-list { display:flex; flex-direction:column; gap:.35rem; }
+  .lang-item, .qual-item {
     display:flex; align-items:center; gap:.55rem;
     padding:.6rem .65rem;
     background:#1e2230;
@@ -1082,28 +1088,31 @@ async function handleRequest(req, res) {
     cursor:grab; user-select:none;
     touch-action:manipulation;
     min-height:48px;
-    transition:background .1s, border-color .1s, transform .1s;
+    transition:background .1s, border-color .1s, transform .1s, opacity .15s;
   }
-  .lang-item:hover { border-color:#3a4254; }
-  .lang-item.on { background:#1c2a4a; border-color:#2f4780; }
-  .lang-item.dragging { opacity:.5; transform:scale(.98); }
-  .lang-item.drag-over { border-color:var(--acc); background:#243358; }
+  .lang-item:hover, .qual-item:hover { border-color:#3a4254; }
+  .lang-item.on, .qual-item.on { background:#1c2a4a; border-color:#2f4780; }
+  .lang-item.off, .qual-item.off { opacity:.5; }
+  .lang-item.dragging, .qual-item.dragging { opacity:.5; transform:scale(.98); }
+  .lang-item.drag-over, .qual-item.drag-over { border-color:var(--acc); background:#243358; }
   .lang-item .flag { font-size:1.2rem; flex:none; }
-  .lang-item .nm { flex:1; font-size:.86rem; }
-  .lang-item .pos {
+  .lang-item .nm, .qual-item .lbl { flex:1; font-size:.86rem; }
+  .lang-item .pos, .qual-item .num {
     color:var(--dim); font-size:.68rem; font-variant-numeric:tabular-nums;
     min-width:24px; text-align:center;
     background:#0b0d12; border-radius:6px; padding:.12rem 0;
+    font-weight:700;
   }
-  .lang-item .ck {
+  .qual-item .num { background:var(--acc); color:#fff; border-radius:50%; min-width:22px; height:22px; padding:0; line-height:22px; }
+  .lang-item .ck, .qual-item .ck {
     width:20px; height:20px; border-radius:50%;
     border:2px solid var(--line); flex:none;
     display:grid; place-items:center;
     transition:all .12s;
   }
-  .lang-item.on .ck { border-color:var(--ok); background:var(--ok); }
-  .lang-item.on .ck::after { content:"✓"; color:#04120a; font-size:.72rem; font-weight:900; }
-  .lang-item .grip { color:var(--dim); font-size:1rem; cursor:grab; padding:0 .15rem; }
+  .lang-item.on .ck, .qual-item.on .ck { border-color:var(--ok); background:var(--ok); }
+  .lang-item.on .ck::after, .qual-item.on .ck::after { content:"✓"; color:#04120a; font-size:.72rem; font-weight:900; }
+  .lang-item .grip, .qual-item .grip { color:var(--dim); font-size:1rem; cursor:grab; padding:0 .15rem; }
 
   .btn-more {
     width:100%; padding:.7rem;
@@ -1114,26 +1123,6 @@ async function handleRequest(req, res) {
   }
   .btn-more:hover { color:var(--acc); border-color:var(--acc); }
 
-  /* ==== QUALITÉ ==== */
-  .qual-item {
-    display:flex; align-items:center; gap:.6rem;
-    padding:.7rem .75rem; margin-bottom:.4rem;
-    background:#1e2230; border:1px solid var(--line);
-    border-radius:10px; cursor:grab; user-select:none;
-    touch-action:manipulation;
-    min-height:48px;
-    transition:background .1s, border-color .1s, transform .1s;
-  }
-  .qual-item.dragging { opacity:.5; transform:scale(.98); }
-  .qual-item .num {
-    background:var(--acc); color:#fff; border-radius:50%;
-    width:22px; height:22px; display:grid; place-items:center;
-    font-size:.72rem; font-weight:700; flex:none;
-  }
-  .qual-item .lbl { flex:1; font-size:.86rem; }
-  .qual-item .grip { color:var(--dim); }
-
-  /* ==== OPTIONS ==== */
   .opt-row {
     display:flex; align-items:center; justify-content:space-between;
     gap:.6rem; padding:.8rem 0;
@@ -1151,14 +1140,10 @@ async function handleRequest(req, res) {
     font-weight:600;
   }
   .toggle button.on { background:var(--acc); border-color:var(--acc); color:#fff; }
-  input[type=range] {
-    width:100%; accent-color:var(--acc); margin-top:.45rem;
-    height:30px;
-  }
+  input[type=range] { width:100%; accent-color:var(--acc); margin-top:.45rem; height:30px; }
   .slider-val { color:var(--acc); font-weight:700; font-size:.8rem; }
   .slider-hint { display:flex; justify-content:space-between; font-size:.68rem; color:var(--dim); margin-top:.15rem; }
 
-  /* ==== FOOTER ==== */
   .modal footer {
     padding:.65rem .8rem calc(.65rem + var(--safe-b));
     border-top:1px solid var(--line);
@@ -1189,7 +1174,6 @@ async function handleRequest(req, res) {
   .btn:hover { filter:brightness(1.08); }
   .btn:active { transform:scale(.98); }
 
-  /* ==== TOAST ==== */
   #toast {
     position:fixed; left:50%; bottom:calc(1.5rem + var(--safe-b));
     transform:translateX(-50%) translateY(20px);
@@ -1202,7 +1186,6 @@ async function handleRequest(req, res) {
   }
   #toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
 
-  /* Small mobile */
   @media (max-width:400px) {
     .title-block h1 { font-size:.88rem; }
     .title-block .desc { display:none; }
@@ -1223,30 +1206,35 @@ async function handleRequest(req, res) {
   </header>
 
   <nav class="tabs">
-    <button data-tab="langs" class="active">🗣️ Langues</button>
-    <button data-tab="quals">🎞️ Qualité</button>
+    <button data-tab="quals" class="active">🎞️ Qualité</button>
+    <button data-tab="langs">🗣️ Langues</button>
     <button data-tab="opts">⚙️ Options</button>
   </nav>
 
   <div class="content">
 
-    <section class="section active" id="tab-langs">
+    <section class="section active" id="tab-quals">
+      <h2>🎞️ Qualité d'image
+        <span class="mini">
+          <button id="qualAll">Tout</button>
+          <button id="qualNone">Rien</button>
+        </span>
+      </h2>
+      <p class="hint">Touchez pour activer/désactiver. Glissez pour changer l'ordre de priorité.</p>
+      <div id="quals" class="qual-list"></div>
+    </section>
+
+    <section class="section" id="tab-langs">
       <h2>🗣️ Langues
         <span class="mini">
           <button id="langAll">Tout</button>
           <button id="langNone">Rien</button>
         </span>
       </h2>
-      <p class="hint">Glissez pour classer (haut = prioritaire). Touchez pour afficher/masquer.</p>
+      <p class="hint">Touchez pour activer/désactiver. Glissez pour changer l'ordre de priorité.</p>
       <div id="langsTop" class="lang-list"></div>
       <button class="btn-more" id="toggleOthers">▼ Afficher les autres langues</button>
       <div id="langsOthers" class="lang-list" style="display:none;margin-top:.6rem;"></div>
-    </section>
-
-    <section class="section" id="tab-quals">
-      <h2>🎞️ Qualité d'image</h2>
-      <p class="hint">Glissez pour changer l'ordre de préférence (haut = prioritaire).</p>
-      <div id="quals"></div>
     </section>
 
     <section class="section" id="tab-opts">
@@ -1310,15 +1298,17 @@ const QUALS = [
 function load(k, def) { try { const v = JSON.parse(localStorage.getItem("ia_cfg_"+k)); return v ?? def; } catch(e){ return def; } }
 function save(k, v) { localStorage.setItem("ia_cfg_"+k, JSON.stringify(v)); }
 
-let langOrder = load("langOrder", ALL_LANGS.map(l => l.code));
-let langOn    = load("langOn",    Object.fromEntries(ALL_LANGS.map(l => [l.code, true])));
-let qualArr   = load("quals",     QUALS.map(q => q.k));
-let hdr       = load("hdr",       1);
-let maxSize   = load("size",      0);
-let minPct    = load("minPct",    50);
+let langOrder  = load("langOrder",  ALL_LANGS.map(l => l.code));
+let langOn     = load("langOn",     Object.fromEntries(ALL_LANGS.map(l => [l.code, true])));
+let qualOrder  = load("qualOrder",  QUALS.map(q => q.k));
+let qualOn     = load("qualOn",     Object.fromEntries(QUALS.map(q => [q.k, true])));
+let hdr        = load("hdr",        1);
+let maxSize    = load("size",       0);
+let minPct     = load("minPct",     50);
 let showOthers = false;
 
 const langByCode = Object.fromEntries(ALL_LANGS.map(l => [l.code, l]));
+const qualByKey = Object.fromEntries(QUALS.map(q => [q.k, q]));
 
 document.querySelectorAll('.tabs button').forEach(b => {
   b.onclick = () => {
@@ -1328,6 +1318,7 @@ document.querySelectorAll('.tabs button').forEach(b => {
   };
 });
 
+// ==== DRAG & DROP TACTILE ====
 function enableReorder(container, onMove) {
   let dragFrom = null, placeholder = null;
   function getEl(e) { return e.target.closest('[data-code],[data-i]'); }
@@ -1377,6 +1368,42 @@ function enableReorder(container, onMove) {
   container.addEventListener('pointercancel', finish);
 }
 
+// ==== QUALITÉS ====
+const qualsBox = document.getElementById("quals");
+function renderQuals() {
+  qualsBox.innerHTML = "";
+  qualOrder.forEach((k, i) => {
+    const q = qualByKey[k];
+    if (!q) return;
+    const el = document.createElement("div");
+    el.className = "qual-item" + (qualOn[k] ? " on" : " off");
+    el.dataset.i = k;
+    el.innerHTML =
+      '<span class="num">' + (i + 1) + '</span>' +
+      '<span class="lbl">' + q.label + '</span>' +
+      '<span class="grip">☰</span>' +
+      '<span class="ck"></span>';
+    el.onclick = (e) => {
+      if (e.target.classList.contains("grip")) return;
+      qualOn[k] = !qualOn[k];
+      save("qualOn", qualOn);
+      renderQuals();
+      update();
+    };
+    qualsBox.appendChild(el);
+  });
+}
+enableReorder(qualsBox, (order) => {
+  qualOrder = order;
+  save("qualOrder", qualOrder);
+  renderQuals();
+  update();
+});
+
+document.getElementById("qualAll").onclick  = () => { Object.keys(qualOn).forEach(k => qualOn[k] = true);  save("qualOn", qualOn); renderQuals(); update(); };
+document.getElementById("qualNone").onclick = () => { Object.keys(qualOn).forEach(k => qualOn[k] = false); save("qualOn", qualOn); renderQuals(); update(); };
+
+// ==== LANGUES ====
 const langsTopBox = document.getElementById("langsTop");
 const langsOthersBox = document.getElementById("langsOthers");
 
@@ -1384,7 +1411,7 @@ function buildLangEl(code, idx) {
   const l = langByCode[code];
   if (!l) return null;
   const el = document.createElement("div");
-  el.className = "lang-item" + (langOn[code] ? " on" : "");
+  el.className = "lang-item" + (langOn[code] ? " on" : " off");
   el.dataset.code = code;
   el.innerHTML =
     '<span class="pos">' + (idx + 1) + '</span>' +
@@ -1438,29 +1465,7 @@ document.getElementById("toggleOthers").onclick = () => { showOthers = !showOthe
 document.getElementById("langAll").onclick  = () => { Object.keys(langOn).forEach(k => langOn[k] = true);  save("langOn", langOn); renderLangs(); update(); };
 document.getElementById("langNone").onclick = () => { Object.keys(langOn).forEach(k => langOn[k] = false); save("langOn", langOn); renderLangs(); update(); };
 
-const qualsBox = document.getElementById("quals");
-function renderQuals() {
-  qualsBox.innerHTML = "";
-  qualArr.forEach((k, i) => {
-    const q = QUALS.find(x => x.k === k);
-    if (!q) return;
-    const el = document.createElement("div");
-    el.className = "qual-item";
-    el.dataset.i = i;
-    el.innerHTML =
-      '<span class="num">' + (i + 1) + '</span>' +
-      '<span class="lbl">' + q.label + '</span>' +
-      '<span class="grip">☰</span>';
-    qualsBox.appendChild(el);
-  });
-}
-enableReorder(qualsBox, () => {
-  qualArr = Array.from(qualsBox.children).map(c => qualArr[+c.dataset.i]);
-  save("quals", qualArr);
-  renderQuals();
-  update();
-});
-
+// ==== TOGGLES ====
 function bindToggle(key, val, onSet) {
   document.querySelectorAll('[data-k="' + key + '"] button').forEach(b => {
     if (String(val) === b.dataset.v) b.classList.add("on");
@@ -1474,6 +1479,7 @@ function bindToggle(key, val, onSet) {
 }
 bindToggle("hdr", hdr, v => { hdr = v; save("hdr", hdr); });
 
+// ==== SLIDERS ====
 const sizeEl = document.getElementById("size"), sizeVal = document.getElementById("sizeVal");
 sizeEl.value = maxSize;
 const sizeText = v => v == 0 ? "Illimitée" : v + " Go max";
@@ -1485,10 +1491,12 @@ pctEl.value = minPct;
 pctVal.textContent = minPct + "%";
 pctEl.oninput = () => { minPct = +pctEl.value; pctVal.textContent = minPct + "%"; save("minPct", minPct); update(); };
 
+// ==== URL + COPY ====
 function buildCfg() {
   return {
+    // ordre + uniquement qualités actives
+    quals:  qualOrder.filter(k => qualOn[k]),
     langs:  langOrder.filter(c => langOn[c]),
-    quals:  qualArr,
     hdr,
     size:   maxSize,
     minPct,
@@ -1502,9 +1510,11 @@ function update() {
   document.getElementById("url").textContent = url;
   document.getElementById("install").href = "stremio://" + url.replace(/^https?:\\/\\//, "");
 
-  const nbL = cfg.langs.length, total = ALL_LANGS.length;
+  const nbQ = cfg.quals.length;
+  const nbL = cfg.langs.length;
   document.getElementById("summary").textContent =
-    "v1.7.6 · " + nbL + "/" + total + " · " + (hdr ? "HDR" : "SDR") + " · " + (maxSize ? maxSize + "Go" : "∞") + " · " + minPct + "%";
+    "v1.7.7 · " + nbQ + "/" + QUALS.length + " Q · " + nbL + "/" + ALL_LANGS.length + " L · " +
+    (hdr ? "HDR" : "SDR") + " · " + (maxSize ? maxSize + "Go" : "∞") + " · " + minPct + "%";
 }
 
 let toastTimer;
@@ -1522,8 +1532,8 @@ document.getElementById("copy").onclick = async () => {
   toastTimer = setTimeout(() => t.classList.remove("show"), 1400);
 };
 
-renderLangs();
 renderQuals();
+renderLangs();
 update();
 </script>
 </body></html>`);
